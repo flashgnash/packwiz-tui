@@ -349,17 +349,18 @@ func GitCheckoutFile(repoRoot, filePath string) error {
 	return cmd.Run()
 }
 
-// GetModifiedFiles returns a map of file paths that have been modified according to git status.
-// GetDeletedFiles returns a map of file paths that have been deleted according to git status.
-func GetGitStatus(repoRoot string) (modified map[string]bool, deleted map[string]bool, err error) {
+// GetGitStatus returns maps of file paths by their git status.
+// Returns: modified (M), added (A), deleted (D)
+func GetGitStatus(repoRoot string) (modified map[string]bool, added map[string]bool, deleted map[string]bool, err error) {
 	cmd := exec.Command("git", "status", "--porcelain")
 	cmd.Dir = repoRoot
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	modified = make(map[string]bool)
+	added = make(map[string]bool)
 	deleted = make(map[string]bool)
 	lines := strings.Split(string(out), "\n")
 	for _, line := range lines {
@@ -376,8 +377,11 @@ func GetGitStatus(repoRoot string) (modified map[string]bool, deleted map[string
 		// Convert to absolute path and normalize
 		absPath := filepath.Clean(filepath.Join(repoRoot, filename))
 
-		// Check if file is modified (M or A in first or second position)
-		if status[0] == 'M' || status[1] == 'M' || status[0] == 'A' || status[1] == 'A' {
+		// Check if file is added (A in first or second position)
+		if status[0] == 'A' || status[1] == 'A' {
+			added[absPath] = true
+		} else if status[0] == 'M' || status[1] == 'M' {
+			// Modified but not added
 			modified[absPath] = true
 		}
 
@@ -386,7 +390,7 @@ func GetGitStatus(repoRoot string) (modified map[string]bool, deleted map[string
 			deleted[absPath] = true
 		}
 	}
-	return modified, deleted, nil
+	return modified, added, deleted, nil
 }
 
 // GitPushAll stages everything, commits, and pushes from repoRoot.

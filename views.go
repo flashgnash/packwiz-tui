@@ -158,7 +158,7 @@ func (a *App) viewManageMods() string {
 
 	// Count subtitle with git stats: "X mods  +Y -Z"
 	modCount := fmt.Sprintf("%d mods", len(a.modsFiltered))
-	additions := len(a.modsModified)
+	additions := len(a.modsAdded)
 	deletions := len(a.modsDeleted)
 	gitStats := ""
 	if additions > 0 {
@@ -204,11 +204,14 @@ func (a *App) viewManageMods() string {
 	for i, mod := range a.modsFiltered {
 		isDeleted := a.modsDeleted[mod.Path]
 		isModified := a.modsModified[mod.Path]
+		isAdded := a.modsAdded[mod.Path]
 
-		// Status indicators (M for modified, D for deleted) - rendered separately
+		// Status indicators (A for added, M for modified, D for deleted) - rendered separately
 		var statusIndicator string
 		if isDeleted {
 			statusIndicator = styleDeleteBtn.Render("D") + " "
+		} else if isAdded {
+			statusIndicator = lipgloss.NewStyle().Foreground(colorSuccess).Render("A") + " "
 		} else if isModified {
 			statusIndicator = styleHighlight.Render("M") + " "
 		} else {

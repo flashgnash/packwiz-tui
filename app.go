@@ -40,6 +40,7 @@ type msgPackError struct{ err error }
 type msgModsLoaded struct {
 	mods     []ModFile
 	modified map[string]bool
+	added    map[string]bool
 	deleted  map[string]bool
 }
 type msgCmdDone struct {
@@ -97,6 +98,7 @@ type App struct {
 	modsFiltered []ModFile
 	modsIdx      int
 	modsModified map[string]bool // track modified mods by path (from git)
+	modsAdded    map[string]bool // track added mods by path (from git)
 	modsDeleted  map[string]bool // track deleted mods by path (from git)
 	searchInput  textinput.Model
 	searchFocus  bool
@@ -247,8 +249,8 @@ func (a *App) loadMods() tea.Cmd {
 		if err != nil {
 			return msgCmdDone{output: err.Error(), err: err}
 		}
-		// Get git status for modified and deleted files
-		modified, deleted, _ := GetGitStatus(a.repoRoot)
+		// Get git status for modified, added, and deleted files
+		modified, added, deleted, _ := GetGitStatus(a.repoRoot)
 
 		// Add deleted files to the mods list so they show up
 		modsDir := filepath.Join(a.packDir, "mods")
@@ -291,7 +293,7 @@ func (a *App) loadMods() tea.Cmd {
 			return strings.ToLower(mods[i].Name) < strings.ToLower(mods[j].Name)
 		})
 
-		return msgModsLoaded{mods: mods, modified: modified, deleted: deleted}
+		return msgModsLoaded{mods: mods, modified: modified, added: added, deleted: deleted}
 	}
 }
 
@@ -436,6 +438,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case msgModsLoaded:
 		a.mods = m.mods
 		a.modsModified = m.modified
+		a.modsAdded = m.added
 		a.modsDeleted = m.deleted
 		a.filterMods()
 		a.screen = ScreenManageMods
