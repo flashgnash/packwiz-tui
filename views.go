@@ -423,7 +423,7 @@ func (a *App) viewInteractive() string {
 	rows = append(rows, "")
 
 	for i, opt := range a.interactiveOptions {
-		num := fmt.Sprintf("[%d]", i+1)
+		num := fmt.Sprintf("[%d]", i)
 		var line string
 		if i == a.interactiveSelected {
 			line = styleMenuItemSelected.Render(" " + num + " " + opt)

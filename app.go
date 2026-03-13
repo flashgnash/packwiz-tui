@@ -832,8 +832,8 @@ func (a *App) updateInteractive(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.interactiveSelected++
 		}
 	case "enter", " ":
-		// User selected an option (1-indexed)
-		selection := fmt.Sprintf("%d", a.interactiveSelected+1)
+		// User selected an option (0-indexed, packwiz uses 0 for cancel)
+		selection := fmt.Sprintf("%d", a.interactiveSelected)
 		a.startOutput()
 		return a, a.runPackwizWithInput(selection, a.interactivePending)
 	}
