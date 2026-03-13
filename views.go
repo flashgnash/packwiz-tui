@@ -137,17 +137,10 @@ func (a *App) viewMainMenu() string {
 func (a *App) viewManageMods() string {
 	a.clickZones = nil // reset each render
 
-	// Header
-	count := styleBadgeInfo.Render(fmt.Sprintf(" %d/%d ", len(a.modsFiltered), len(a.mods)))
-	header := lipgloss.JoinHorizontal(lipgloss.Left,
-		styleTitle.Render("  Manage Mods"), "  ", count,
-	)
-
 	panelW := clamp(64, 40, a.width-4)
 	panelX := (a.width - panelW) / 2 // left edge of panel when centred
 
-	// Search row — "/ <input>  [+]"
-	// Reserve 5 chars on right for " [+] "
+	// Search row at top — "/ <input>  [+]"
 	const addStr = " + "
 	addBtnStr := styleAddBtn.Render(addStr)
 	searchPrefixStr := " / "
@@ -163,6 +156,22 @@ func (a *App) viewManageMods() string {
 
 	addBtnX := panelX + panelW - len(addStr) - 2
 
+	// Count subtitle with git stats: "X mods  +Y -Z"
+	modCount := fmt.Sprintf("%d mods", len(a.modsFiltered))
+	additions := len(a.modsModified)
+	deletions := len(a.modsDeleted)
+	gitStats := ""
+	if additions > 0 {
+		gitStats += lipgloss.NewStyle().Foreground(colorSuccess).Render(fmt.Sprintf("+%d", additions))
+	}
+	if deletions > 0 {
+		if gitStats != "" {
+			gitStats += " "
+		}
+		gitStats += lipgloss.NewStyle().Foreground(colorDanger).Render(fmt.Sprintf("-%d", deletions))
+	}
+	subtitle := styleSubtitle.Render("  "+modCount) + "  " + gitStats
+
 	const reservedRows = 11
 	listH := a.height - reservedRows
 	if listH < 4 {
@@ -171,11 +180,9 @@ func (a *App) viewManageMods() string {
 
 	// Compute y positions relative to top of screen.
 	// Place uses lipgloss.Top so content starts at y=0 with no top padding from Place.
-	// Actual content top = (height-1 - contentH) / 2 for lipgloss.Center vertically,
-	// but we use lipgloss.Top so contentY = 0.
-	headerH := lipgloss.Height(header)
-	searchY := headerH + 1 // header + blank line
-	listY := searchY + lipgloss.Height(searchRow) + 1 + 1 // search + blank + top border
+	searchY := 0 // search at very top
+	subtitleY := searchY + lipgloss.Height(searchRow)
+	listY := subtitleY + lipgloss.Height(subtitle) + 1 // subtitle + blank + top border
 
 	a.clickZones = append(a.clickZones, clickZone{
 		x: addBtnX, y: searchY, w: len(addStr), h: 1,
@@ -220,11 +227,14 @@ func (a *App) viewManageMods() string {
 
 		// Apply styling to name only, keep indicator separate
 		var nameLine string
-		if isDeleted {
-			nameLine = styleModItemDeleted.Render(name + pad)
-		} else if i == a.modsIdx {
+		if i == a.modsIdx {
+			// Selected item - use selected style even if deleted
 			nameLine = styleModItemSelected.Render(name + pad)
+		} else if isDeleted {
+			// Not selected but deleted - use deleted style
+			nameLine = styleModItemDeleted.Render(name + pad)
 		} else {
+			// Normal item
 			nameLine = styleModItem.Render(name + pad)
 		}
 
@@ -251,7 +261,7 @@ func (a *App) viewManageMods() string {
 	panel := stylePanelFocused.Width(panelW).Height(listH).Render(strings.Join(visible, "\n"))
 
 	content := lipgloss.JoinVertical(lipgloss.Left,
-		header, "", searchRow, "", panel,
+		searchRow, subtitle, "", panel,
 	)
 
 	if a.addModModal {
