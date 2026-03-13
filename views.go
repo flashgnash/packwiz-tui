@@ -85,6 +85,22 @@ func (a *App) viewCloneRepo() string {
 // ── Main menu ─────────────────────────────────────────────────────────────────
 
 func (a *App) viewMainMenu() string {
+	a.clickZones = nil
+
+	// Calculate vertical centre offset so we can register click zones.
+	// Logo(6) + subtitle(1) + packname(1) + path(1) + blank(1) = 10 lines above panel.
+	// Panel has 1 top border + 1 blank row before items.
+	logoAndHeaderH := 10
+	panelW := clamp(52, 36, a.width-4)
+	panelX := (a.width - panelW) / 2
+	contentH := logoAndHeaderH + 2 + len(mainMenuItems)*2 + 2 // rough
+	topY := (a.height - 1 - contentH) / 2
+	if topY < 0 {
+		topY = 0
+	}
+	// First item row = topY + logoAndHeaderH + 2 (border + blank)
+	firstItemY := topY + logoAndHeaderH + 2
+
 	var rows []string
 	rows = append(rows, "")
 	for i, item := range mainMenuItems {
@@ -96,11 +112,16 @@ func (a *App) viewMainMenu() string {
 			line = styleMenuItem.Render(" " + item.icon + "  " + item.label + " ")
 		}
 		rows = append(rows, num+" "+line, "")
+
+		// Each item occupies 2 rows (item + blank), register click on item row.
+		itemY := firstItemY + i*2
+		a.clickZones = append(a.clickZones, clickZone{
+			x: panelX, y: itemY, w: panelW, h: 1,
+			action: fmt.Sprintf("menu:%d", i),
+		})
 	}
 
-	panelW := clamp(52, 36, a.width-4)
 	panel := stylePanelFocused.Width(panelW).Render(strings.Join(rows, "\n"))
-
 	content := lipgloss.JoinVertical(lipgloss.Center,
 		renderLogo(),
 		"  "+styleBadge.Render(" "+a.packName+" "),
@@ -114,6 +135,8 @@ func (a *App) viewMainMenu() string {
 // ── Manage mods ───────────────────────────────────────────────────────────────
 
 func (a *App) viewManageMods() string {
+	a.clickZones = nil // reset each render
+
 	// Header
 	count := styleBadgeInfo.Render(fmt.Sprintf(" %d/%d ", len(a.modsFiltered), len(a.mods)))
 	header := lipgloss.JoinHorizontal(lipgloss.Left,
@@ -121,15 +144,24 @@ func (a *App) viewManageMods() string {
 	)
 
 	panelW := clamp(64, 40, a.width-4)
+	panelX := (a.width - panelW) / 2 // left edge of panel when centred
 
-	// Search row — input fills panel width minus the "/ " prefix (3 chars)
+	// Search row — "/ <input>  [+]"
+	// Reserve 5 chars on right for " [+] "
+	const addStr = " + "
+	addBtnStr := styleAddBtn.Render(addStr)
 	searchPrefixStr := " / "
 	searchPrefix := styleSearchLabel.Render(searchPrefixStr)
 	if a.searchFocus {
 		searchPrefix = styleSearchActive.Render(searchPrefixStr)
 	}
-	a.searchInput.Width = panelW - len(searchPrefixStr) - 2
-	searchRow := searchPrefix + a.searchInput.View()
+	// innerW of panel = panelW - 4 (borders + padding)
+	innerW := panelW - 4
+	a.searchInput.Width = innerW - len(searchPrefixStr) - len(addStr)
+	gap := strings.Repeat(" ", innerW-len(searchPrefixStr)-a.searchInput.Width-len(addStr))
+	searchRow := searchPrefix + a.searchInput.View() + gap + addBtnStr
+
+	addBtnX := panelX + panelW - len(addStr) - 2
 
 	const reservedRows = 11
 	listH := a.height - reservedRows
@@ -137,20 +169,45 @@ func (a *App) viewManageMods() string {
 		listH = 4
 	}
 
+	// Compute y positions relative to top of screen.
+	// Place uses lipgloss.Top so content starts at y=0 with no top padding from Place.
+	// Actual content top = (height-1 - contentH) / 2 for lipgloss.Center vertically,
+	// but we use lipgloss.Top so contentY = 0.
+	headerH := lipgloss.Height(header)
+	searchY := headerH + 1 // header + blank line
+	listY := searchY + lipgloss.Height(searchRow) + 1 + 1 // search + blank + top border
+
+	a.clickZones = append(a.clickZones, clickZone{
+		x: addBtnX, y: searchY, w: len(addStr), h: 1,
+		action: "add_mod",
+	})
+
+	const delStr = " − "
+	delW := len(delStr) // 3 chars, no ANSI
+
 	var rows []string
 	if len(a.modsFiltered) == 0 {
 		rows = append(rows, styleSubtitle.Render("  no mods found"))
 	}
-	rowW := panelW - 2 // subtract panel border padding
+	// panelW includes borders(2) and padding(1 each side) = 4
+	nameW := innerW - delW - 1 // 1 space between name and button
+
 	for i, mod := range a.modsFiltered {
-		delW := lipgloss.Width("[-]")
-		nameW := rowW - delW - 2
 		name := truncate(mod.Name, nameW)
-		namePadded := name + strings.Repeat(" ", nameW-lipgloss.Width(name))
+		pad := strings.Repeat(" ", nameW-lipgloss.Width(name))
+		del := styleDeleteBtn.Render(delStr)
+
+		// Register − click zone
+		delX := panelX + innerW - delW + 2
+		a.clickZones = append(a.clickZones, clickZone{
+			x: delX, y: listY + i, w: delW, h: 1,
+			action: fmt.Sprintf("del:%d", i),
+		})
+
 		if i == a.modsIdx {
-			rows = append(rows, styleModItemSelected.Render(namePadded+" [-]"))
+			rows = append(rows, styleModItemSelected.Render(name+pad)+" "+del)
 		} else {
-			rows = append(rows, styleModItem.Render(namePadded)+" "+styleDeleteBtn.Render("[-]"))
+			rows = append(rows, styleModItem.Render(name+pad)+" "+del)
 		}
 	}
 

@@ -89,6 +89,14 @@ type App struct {
 	statusMsg    string
 	statusIsErr  bool
 	statusExpire time.Time
+
+	// Mouse click zones
+	clickZones []clickZone
+}
+
+type clickZone struct {
+	x, y, w, h int
+	action      string // "add_mod" or "del:N"
 }
 
 func NewApp() *App {
@@ -231,6 +239,35 @@ func (a *App) expireStatus() tea.Cmd {
 
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m := msg.(type) {
+
+	case tea.MouseMsg:
+		if m.Action == tea.MouseActionRelease && m.Button == tea.MouseButtonLeft {
+			for _, z := range a.clickZones {
+				if m.X >= z.x && m.X < z.x+z.w && m.Y >= z.y && m.Y < z.y+z.h {
+					switch z.action {
+					case "add_mod":
+						a.addModModal = true
+						a.addModInput.Focus()
+						return a, textinput.Blink
+					default:
+						if strings.HasPrefix(z.action, "del:") {
+							var idx int
+							fmt.Sscanf(z.action, "del:%d", &idx)
+							if idx < len(a.modsFiltered) {
+								a.modsIdx = idx
+								return a.deleteMod()
+							}
+						} else if strings.HasPrefix(z.action, "menu:") {
+							var idx int
+							fmt.Sscanf(z.action, "menu:%d", &idx)
+							a.menuIdx = idx
+							return a.activateMenuItem()
+						}
+					}
+				}
+			}
+		}
+		return a, nil
 
 	case tea.WindowSizeMsg:
 		a.width, a.height = m.Width, m.Height

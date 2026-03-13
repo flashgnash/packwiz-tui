@@ -65,7 +65,8 @@ var (
 				PaddingLeft(1)
 
 	styleDeleteBtn = lipgloss.NewStyle().
-			Foreground(colorDanger).
+			Foreground(colorBg).
+			Background(colorDanger).
 			Bold(true)
 
 	styleSearchLabel = lipgloss.NewStyle().
@@ -75,7 +76,8 @@ var (
 				Foreground(colorAccent)
 
 	styleAddBtn = lipgloss.NewStyle().
-			Foreground(colorSuccess).
+			Foreground(colorBg).
+			Background(colorSuccess).
 			Bold(true)
 
 	styleStatusBar = lipgloss.NewStyle().
