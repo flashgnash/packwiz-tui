@@ -600,18 +600,7 @@ func (a *App) View() string {
 	}
 
 	statusBar := a.viewStatusBar()
-	// For the mods screen the view manages its own height, so don't clip it.
-	if a.screen == ScreenManageMods {
-		return lipgloss.JoinVertical(lipgloss.Left, body, statusBar)
-	}
-	bodyH := a.height - lipgloss.Height(statusBar)
-	if bodyH < 0 {
-		bodyH = 0
-	}
-	return lipgloss.JoinVertical(lipgloss.Left,
-		lipgloss.NewStyle().Width(a.width).Height(bodyH).Render(body),
-		statusBar,
-	)
+	return lipgloss.JoinVertical(lipgloss.Left, body, statusBar)
 }
 
 func (a *App) viewStatusBar() string {

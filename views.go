@@ -161,23 +161,18 @@ func (a *App) viewManageMods() string {
 	// Set explicit height so the panel never grows beyond the terminal.
 	panel := stylePanelFocused.Width(panelW).Height(listH).Render(strings.Join(visible, "\n"))
 
-	content := "\n\n\n" + lipgloss.JoinVertical(lipgloss.Left,
+	content := lipgloss.JoinVertical(lipgloss.Left,
 		header, "", searchRow, "", panel,
 	)
 
-	// Center horizontally, pin to top with 1 row padding.
-	contentW := lipgloss.Width(content)
-	leftPad := (a.width - contentW) / 2
-	if leftPad < 0 {
-		leftPad = 0
-	}
-
 	if a.addModModal {
-		placed := lipgloss.NewStyle().PaddingLeft(leftPad).Render(content)
-		return a.renderWithModal(placed, a.viewAddModModal())
+		return a.renderWithModal(
+			lipgloss.Place(a.width, a.height-1, lipgloss.Center, lipgloss.Top, content),
+			a.viewAddModModal(),
+		)
 	}
 
-	return lipgloss.NewStyle().PaddingLeft(leftPad).Render(content)
+	return lipgloss.Place(a.width, a.height-1, lipgloss.Center, lipgloss.Top, content)
 }
 
 func (a *App) viewAddModModal() string {
