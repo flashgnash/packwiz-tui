@@ -33,13 +33,11 @@ var (
 			PaddingLeft(1)
 
 	stylePanel = lipgloss.NewStyle().
-			Background(colorBgPanel).
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(colorBorder).
 			Padding(0, 1)
 
 	stylePanelFocused = lipgloss.NewStyle().
-				Background(colorBgPanel).
 				Border(lipgloss.RoundedBorder()).
 				BorderForeground(colorBorderFoc).
 				Padding(0, 1)
@@ -86,9 +84,7 @@ var (
 
 	styleStatusBar = lipgloss.NewStyle().
 			Background(colorBgPanel).
-			Foreground(colorMuted).
-			PaddingLeft(1).
-			PaddingRight(1)
+			Foreground(colorMuted)
 
 	styleStatusKey = lipgloss.NewStyle().
 			Foreground(colorAccent2).

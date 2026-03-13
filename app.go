@@ -468,7 +468,7 @@ func (a *App) updateManageMods(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.searchInput.Focus()
 				return a, textinput.Blink
 			}
-		case "ctrl+n":
+		case "n":
 			a.addModModal = true
 			a.addModInput.Focus()
 			return a, textinput.Blink
@@ -613,7 +613,7 @@ func (a *App) viewStatusBar() string {
 	case ScreenMainMenu:
 		hints = []string{"↑↓ navigate", "enter select", "1-4 shortcut", "q quit"}
 	case ScreenManageMods:
-		hints = []string{"/ search", "ctrl+n add", "d delete", "esc back"}
+		hints = []string{"/ search", "n add", "d delete", "esc back"}
 	case ScreenOutput:
 		if a.outputDone {
 			hints = []string{"enter continue"}

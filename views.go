@@ -120,18 +120,17 @@ func (a *App) viewManageMods() string {
 		styleTitle.Render("  Manage Mods"), "  ", count,
 	)
 
-	// Search row
-	searchPrefix := styleSearchLabel.Render(" / ")
-	if a.searchFocus {
-		searchPrefix = styleSearchActive.Render(" / ")
-	}
-	searchBar := stylePanel.Render(searchPrefix + a.searchInput.View())
-	addHint := "  " + styleAddBtn.Render("[+]") + " " + styleSubtitle.Render("ctrl+n")
-	searchRow := lipgloss.JoinHorizontal(lipgloss.Left, searchBar, addHint)
+	panelW := clamp(64, 40, a.width-4)
 
-	// Chrome above the list: topPad(1) + header(1) + blank(1) + searchRow(3) + blank(1) + status(1) = 8
-	// The panel .Height() excludes its own borders so add 0 for those here.
-	// Empirically verified: 8 leaves the panel border visible with one row of top padding.
+	// Search row — input fills panel width minus the "/ " prefix (3 chars)
+	searchPrefixStr := " / "
+	searchPrefix := styleSearchLabel.Render(searchPrefixStr)
+	if a.searchFocus {
+		searchPrefix = styleSearchActive.Render(searchPrefixStr)
+	}
+	a.searchInput.Width = panelW - len(searchPrefixStr) - 2
+	searchRow := searchPrefix + a.searchInput.View()
+
 	const reservedRows = 11
 	listH := a.height - reservedRows
 	if listH < 4 {
@@ -142,21 +141,23 @@ func (a *App) viewManageMods() string {
 	if len(a.modsFiltered) == 0 {
 		rows = append(rows, styleSubtitle.Render("  no mods found"))
 	}
+	rowW := panelW - 2 // subtract panel border padding
 	for i, mod := range a.modsFiltered {
 		del := styleMuted("[-]")
-		name := fmt.Sprintf("%-36s", truncate(mod.Name, 34))
+		delW := lipgloss.Width("[-]")
+		nameW := rowW - delW - 2
+		name := truncate(mod.Name, nameW)
+		namePadded := name + strings.Repeat(" ", nameW-lipgloss.Width(name))
 		if i == a.modsIdx {
 			del = styleDeleteBtn.Render("[-]")
-			rows = append(rows, styleModItemSelected.Render(name)+" "+del)
+			rows = append(rows, styleModItemSelected.Render(namePadded)+" "+del)
 		} else {
-			rows = append(rows, styleModItem.Render(name)+" "+del)
+			rows = append(rows, styleModItem.Render(namePadded)+" "+del)
 		}
 	}
 
 	start, end := visibleWindow(a.modsIdx, len(rows), listH)
 	visible := rows[start:end]
-
-	panelW := clamp(64, 40, a.width-4)
 
 	// Set explicit height so the panel never grows beyond the terminal.
 	panel := stylePanelFocused.Width(panelW).Height(listH).Render(strings.Join(visible, "\n"))
