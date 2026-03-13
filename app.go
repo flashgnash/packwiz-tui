@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -251,11 +252,20 @@ func (a *App) loadMods() tea.Cmd {
 
 		// Add deleted files to the mods list so they show up
 		modsDir := filepath.Join(a.packDir, "mods")
+		modsDirNorm := filepath.Clean(modsDir) + string(filepath.Separator) // Add separator for proper prefix matching
+
 		for deletedPath := range deleted {
-			// Only include files from the mods directory
-			if !strings.HasPrefix(deletedPath, modsDir) {
+			deletedNorm := filepath.Clean(deletedPath)
+
+			// Check if this deleted file is in the mods directory
+			// Must either be exact dir match or have dir as prefix with separator
+			inModsDir := strings.HasPrefix(deletedNorm+string(filepath.Separator), modsDirNorm) ||
+				filepath.Dir(deletedNorm) == filepath.Clean(modsDir)
+
+			if !inModsDir {
 				continue
 			}
+
 			// Check if already in list (shouldn't be, but just in case)
 			found := false
 			for _, m := range mods {
@@ -270,11 +280,16 @@ func (a *App) loadMods() tea.Cmd {
 					mods = append(mods, ModFile{
 						Name:     strings.TrimSuffix(filename, ".toml"),
 						Filename: filename,
-						Path:     deletedPath,
+						Path:     filepath.Clean(deletedPath),
 					})
 				}
 			}
 		}
+
+		// Sort all mods alphabetically by name
+		sort.Slice(mods, func(i, j int) bool {
+			return strings.ToLower(mods[i].Name) < strings.ToLower(mods[j].Name)
+		})
 
 		return msgModsLoaded{mods: mods, modified: modified, deleted: deleted}
 	}

@@ -190,22 +190,22 @@ func (a *App) viewManageMods() string {
 		rows = append(rows, styleSubtitle.Render("  no mods found"))
 	}
 	// panelW includes borders(2) and padding(1 each side) = 4
-	// Reserve 3 chars for status indicators "MD "
-	const statusIndicatorW = 3
+	// Reserve 2 chars for status indicators "M " or "D "
+	const statusIndicatorW = 2
 	nameW := innerW - delW - statusIndicatorW - 1 // 1 space between name and button
 
 	for i, mod := range a.modsFiltered {
 		isDeleted := a.modsDeleted[mod.Path]
 		isModified := a.modsModified[mod.Path]
 
-		// Status indicators (M for modified, D for deleted)
+		// Status indicators (M for modified, D for deleted) - rendered separately
 		var statusIndicator string
 		if isDeleted {
-			statusIndicator = styleDeleteBtn.Render("D") + "  "
+			statusIndicator = styleDeleteBtn.Render("D") + " "
 		} else if isModified {
-			statusIndicator = styleHighlight.Render("M") + "  "
+			statusIndicator = styleHighlight.Render("M") + " "
 		} else {
-			statusIndicator = "   "
+			statusIndicator = "  "
 		}
 
 		name := truncate(mod.Name, nameW)
@@ -218,15 +218,18 @@ func (a *App) viewManageMods() string {
 			del = styleDeleteBtn.Render(delStr)
 		}
 
-		var line string
+		// Apply styling to name only, keep indicator separate
+		var nameLine string
 		if isDeleted {
-			line = styleModItemDeleted.Render(statusIndicator + name + pad)
+			nameLine = styleModItemDeleted.Render(name + pad)
 		} else if i == a.modsIdx {
-			line = styleModItemSelected.Render(statusIndicator + name + pad)
+			nameLine = styleModItemSelected.Render(name + pad)
 		} else {
-			line = styleModItem.Render(statusIndicator + name + pad)
+			nameLine = styleModItem.Render(name + pad)
 		}
-		rows = append(rows, line+" "+del)
+
+		// Combine: indicator (unstylied) + styled name + button
+		rows = append(rows, statusIndicator+nameLine+" "+del)
 	}
 
 	start, end := visibleWindow(a.modsIdx, len(rows), listH)

@@ -141,7 +141,7 @@ func ListModFiles(packDir string) ([]ModFile, error) {
 			mods = append(mods, ModFile{
 				Name:     strings.TrimSuffix(e.Name(), ".toml"),
 				Filename: e.Name(),
-				Path:     filepath.Join(modsDir, e.Name()),
+				Path:     filepath.Clean(filepath.Join(modsDir, e.Name())),
 			})
 		}
 	}
@@ -373,8 +373,8 @@ func GetGitStatus(repoRoot string) (modified map[string]bool, deleted map[string
 			continue
 		}
 
-		// Convert to absolute path
-		absPath := filepath.Join(repoRoot, filename)
+		// Convert to absolute path and normalize
+		absPath := filepath.Clean(filepath.Join(repoRoot, filename))
 
 		// Check if file is modified (M or A in first or second position)
 		if status[0] == 'M' || status[1] == 'M' || status[0] == 'A' || status[1] == 'A' {
