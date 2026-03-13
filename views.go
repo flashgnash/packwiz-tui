@@ -195,20 +195,31 @@ func (a *App) viewManageMods() string {
 	for i, mod := range a.modsFiltered {
 		name := truncate(mod.Name, nameW)
 		pad := strings.Repeat(" ", nameW-lipgloss.Width(name))
-		del := styleDeleteBtn.Render(delStr)
 
-		// Register − click zone
-		delX := panelX + innerW - delW + 2
-		a.clickZones = append(a.clickZones, clickZone{
-			x: delX, y: listY + i, w: delW, h: 1,
-			action: fmt.Sprintf("del:%d", i),
-		})
+		isDeleted := a.modsDeleted[mod.Path]
 
-		if i == a.modsIdx {
-			rows = append(rows, styleModItemSelected.Render(name+pad)+" "+del)
+		var del string
+		if isDeleted {
+			del = styleMuted("   ") // empty space instead of button
 		} else {
-			rows = append(rows, styleModItem.Render(name+pad)+" "+del)
+			del = styleDeleteBtn.Render(delStr)
+			// Only register click zone for non-deleted mods
+			delX := panelX + innerW - delW + 2
+			a.clickZones = append(a.clickZones, clickZone{
+				x: delX, y: listY + i, w: delW, h: 1,
+				action: fmt.Sprintf("del:%d", i),
+			})
 		}
+
+		var line string
+		if isDeleted {
+			line = styleModItemDeleted.Render(name + pad)
+		} else if i == a.modsIdx {
+			line = styleModItemSelected.Render(name + pad)
+		} else {
+			line = styleModItem.Render(name + pad)
+		}
+		rows = append(rows, line+" "+del)
 	}
 
 	start, end := visibleWindow(a.modsIdx, len(rows), listH)
@@ -232,14 +243,23 @@ func (a *App) viewManageMods() string {
 }
 
 func (a *App) viewAddModModal() string {
-	return styleModal.Render(lipgloss.JoinVertical(lipgloss.Left,
-		styleModalTitle.Render("  ◈ Add Mod from Modrinth"),
-		styleSubtitle.Render("  Enter a mod slug or name"),
+	title := "◈ Add Mod from Modrinth"
+	subtitle := "Enter a mod slug or name"
+	hint := "enter to add  ·  esc to cancel"
+
+	// Use muted style without padding for modal text
+	modalText := lipgloss.NewStyle().Foreground(colorMuted)
+
+	content := lipgloss.JoinVertical(lipgloss.Left,
+		styleModalTitle.Render(title),
 		"",
-		styleModalInput.Render(a.addModInput.View()),
+		modalText.Render(subtitle),
 		"",
-		styleSubtitle.Render("  enter to add  ·  esc to cancel"),
-	))
+		a.addModInput.View(),
+		"",
+		modalText.Render(hint),
+	)
+	return styleModal.Render(content)
 }
 
 // renderWithModal overlays a modal centred on top of bg.
@@ -247,12 +267,11 @@ func (a *App) renderWithModal(bg, modal string) string {
 	bgLines := strings.Split(bg, "\n")
 	modalLines := strings.Split(modal, "\n")
 
-	bgW := a.width
 	bgH := len(bgLines)
-	modalW := lipgloss.Width(modal)
+	modalW := lipgloss.Width(modalLines[0]) // use first line width
 	modalH := len(modalLines)
 
-	x := (bgW - modalW) / 2
+	x := (a.width - modalW) / 2
 	y := (bgH - modalH) / 2
 	if x < 0 {
 		x = 0
@@ -261,23 +280,42 @@ func (a *App) renderWithModal(bg, modal string) string {
 		y = 0
 	}
 
-	for i, ml := range modalLines {
-		li := y + i
-		for len(bgLines) <= li {
-			bgLines = append(bgLines, "")
+	// Create output lines by overlaying modal on background
+	result := make([]string, bgH)
+	for i := 0; i < bgH; i++ {
+		modalLineIdx := i - y
+		if modalLineIdx >= 0 && modalLineIdx < modalH {
+			// This line has modal content
+			bgLine := ""
+			if i < len(bgLines) {
+				bgLine = bgLines[i]
+			}
+
+			// Get background content before and after modal
+			before := strings.Repeat(" ", x)
+			modalLine := modalLines[modalLineIdx]
+			after := ""
+
+			// Preserve background content after the modal
+			bgWidth := lipgloss.Width(bgLine)
+			modalEnd := x + lipgloss.Width(modalLine)
+			if bgWidth > modalEnd {
+				// Extract the part of the background after the modal
+				// This is tricky with ANSI codes, so we'll just pad with spaces
+				after = strings.Repeat(" ", bgWidth-modalEnd)
+			}
+
+			result[i] = before + modalLine + after
+		} else {
+			// No modal content, use background as-is
+			if i < len(bgLines) {
+				result[i] = bgLines[i]
+			} else {
+				result[i] = ""
+			}
 		}
-		line := bgLines[li]
-		// Pad line to bgW
-		lineW := lipgloss.Width(line)
-		if lineW < bgW {
-			line += strings.Repeat(" ", bgW-lineW)
-		}
-		// We can't cleanly splice ANSI strings by rune offset, so just
-		// build: left-of-x plain spaces + modal line + ignore rest.
-		prefix := strings.Repeat(" ", x)
-		bgLines[li] = prefix + ml
 	}
-	return strings.Join(bgLines, "\n")
+	return strings.Join(result, "\n")
 }
 
 // ── Manage loader ─────────────────────────────────────────────────────────────
@@ -338,5 +376,36 @@ func (a *App) viewOutput() string {
 
 	return lipgloss.Place(a.width, a.height-1, lipgloss.Center, lipgloss.Center,
 		lipgloss.JoinVertical(lipgloss.Left, styleTitle.Render("  Output"), "", panel),
+	)
+}
+
+// ── Interactive ───────────────────────────────────────────────────────────────
+
+func (a *App) viewInteractive() string {
+	var rows []string
+	rows = append(rows, "")
+	rows = append(rows, styleSubtitle.Render("  "+a.interactivePrompt))
+	rows = append(rows, "")
+
+	for i, opt := range a.interactiveOptions {
+		num := fmt.Sprintf("[%d]", i+1)
+		var line string
+		if i == a.interactiveSelected {
+			line = styleMenuItemSelected.Render(" " + num + " " + opt)
+		} else {
+			line = styleMenuItem.Render(" " + num + " " + opt)
+		}
+		rows = append(rows, line)
+	}
+
+	panelW := clamp(64, 40, a.width-4)
+	panel := stylePanelFocused.Width(panelW).Render(strings.Join(rows, "\n"))
+
+	return lipgloss.Place(a.width, a.height-1, lipgloss.Center, lipgloss.Center,
+		lipgloss.JoinVertical(lipgloss.Left,
+			styleTitle.Render("  Multiple Options Found"),
+			"",
+			panel,
+		),
 	)
 }

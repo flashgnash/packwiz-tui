@@ -23,6 +23,7 @@ const (
 	ScreenManageMods
 	ScreenManageLoader
 	ScreenOutput
+	ScreenInteractive
 )
 
 // ── Messages ─────────────────────────────────────────────────────────────────
@@ -39,8 +40,20 @@ type msgCmdDone struct {
 	output string
 	err    error
 }
+type msgInteractivePrompt struct {
+	prompt  string
+	options []string
+	cmd     *interactiveCmd
+}
 type msgSpinTick struct{}
 type msgStatusExpire struct{}
+
+// interactiveCmd holds state for a command waiting on user input.
+type interactiveCmd struct {
+	packDir string
+	args    []string
+	input   string
+}
 
 // ── App ───────────────────────────────────────────────────────────────────────
 
@@ -72,6 +85,7 @@ type App struct {
 	mods         []ModFile
 	modsFiltered []ModFile
 	modsIdx      int
+	modsDeleted  map[string]bool // track deleted mods by path
 	searchInput  textinput.Model
 	searchFocus  bool
 	addModModal  bool
@@ -81,6 +95,12 @@ type App struct {
 	outputLines []string
 	outputErr   bool
 	outputDone  bool
+
+	// Interactive prompt
+	interactivePrompt   string
+	interactiveOptions  []string
+	interactiveSelected int
+	interactivePending  *interactiveCmd
 
 	// Loading
 	loadingMsg string
@@ -121,6 +141,7 @@ func NewApp() *App {
 		cloneInput:  clone,
 		searchInput: search,
 		addModInput: addMod,
+		modsDeleted: make(map[string]bool),
 	}
 }
 
@@ -219,7 +240,25 @@ func (a *App) loadMods() tea.Cmd {
 
 func (a *App) runPackwiz(args ...string) tea.Cmd {
 	return func() tea.Msg {
-		out, err := RunPackwiz(a.packDir, args...)
+		out, prompt, err := RunPackwizInteractive(a.packDir, args...)
+		if prompt != nil {
+			// Interactive prompt detected
+			return msgInteractivePrompt{
+				prompt:  prompt.Prompt,
+				options: prompt.Options,
+				cmd: &interactiveCmd{
+					packDir: a.packDir,
+					args:    args,
+				},
+			}
+		}
+		return msgCmdDone{output: out, err: err}
+	}
+}
+
+func (a *App) runPackwizWithInput(input string, cmd *interactiveCmd) tea.Cmd {
+	return func() tea.Msg {
+		out, err := RunPackwizWithInput(cmd.packDir, input, cmd.args...)
 		return msgCmdDone{output: out, err: err}
 	}
 }
@@ -305,14 +344,30 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case msgModsLoaded:
 		a.mods = m.mods
+		a.modsDeleted = make(map[string]bool) // clear deleted tracking on reload
 		a.filterMods()
 		a.screen = ScreenManageMods
 		return a, nil
 
 	case msgCmdDone:
-		a.outputLines = strings.Split(strings.TrimSpace(m.output), "\n")
+		// Add error details to output for debugging
+		outputText := m.output
+		if m.err != nil && outputText == "" {
+			outputText = "Error: " + m.err.Error()
+		} else if m.err != nil {
+			outputText = outputText + "\n\nError: " + m.err.Error()
+		}
+		a.outputLines = strings.Split(strings.TrimSpace(outputText), "\n")
 		a.outputErr = m.err != nil
 		a.outputDone = true
+		return a, nil
+
+	case msgInteractivePrompt:
+		a.interactivePrompt = m.prompt
+		a.interactiveOptions = m.options
+		a.interactiveSelected = 0
+		a.interactivePending = m.cmd
+		a.screen = ScreenInteractive
 		return a, nil
 	}
 
@@ -330,6 +385,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a.updateManageLoader(msg)
 	case ScreenOutput:
 		return a.updateOutput(msg)
+	case ScreenInteractive:
+		return a.updateInteractive(msg)
 	}
 	return a, nil
 }
@@ -554,8 +611,12 @@ func (a *App) deleteMod() (tea.Model, tea.Cmd) {
 		a.statusExpire = time.Now().Add(4 * time.Second)
 		return a, a.expireStatus()
 	}
-	a.startOutput()
-	return a, a.runPackwiz("refresh")
+	// Mark as deleted and run packwiz refresh silently
+	a.modsDeleted[mod.Path] = true
+	go func() {
+		RunPackwiz(a.packDir, "refresh")
+	}()
+	return a, nil
 }
 
 func (a *App) updateOutput(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -579,6 +640,35 @@ func (a *App) updateOutput(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.outputLines = strings.Split(strings.TrimSpace(m.output), "\n")
 		a.outputErr = m.err != nil
 		a.outputDone = true
+	}
+	return a, nil
+}
+
+func (a *App) updateInteractive(msg tea.Msg) (tea.Model, tea.Cmd) {
+	m, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return a, nil
+	}
+	switch m.String() {
+	case "ctrl+c":
+		return a, tea.Quit
+	case "esc":
+		// Cancel and go back
+		a.screen = ScreenManageMods
+		return a, nil
+	case "up", "k":
+		if a.interactiveSelected > 0 {
+			a.interactiveSelected--
+		}
+	case "down", "j":
+		if a.interactiveSelected < len(a.interactiveOptions)-1 {
+			a.interactiveSelected++
+		}
+	case "enter", " ":
+		// User selected an option (1-indexed)
+		selection := fmt.Sprintf("%d", a.interactiveSelected+1)
+		a.startOutput()
+		return a, a.runPackwizWithInput(selection, a.interactivePending)
 	}
 	return a, nil
 }
@@ -632,6 +722,8 @@ func (a *App) View() string {
 		body = a.viewManageLoader()
 	case ScreenOutput:
 		body = a.viewOutput()
+	case ScreenInteractive:
+		body = a.viewInteractive()
 	default:
 		body = "unknown screen"
 	}
@@ -657,6 +749,8 @@ func (a *App) viewStatusBar() string {
 		} else {
 			hints = []string{"running…"}
 		}
+	case ScreenInteractive:
+		hints = []string{"↑↓ navigate", "enter select", "esc cancel"}
 	}
 
 	// Render each hint as "key desc" with a separator between them.

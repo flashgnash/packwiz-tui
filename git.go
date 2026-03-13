@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -153,6 +154,185 @@ func RunPackwiz(packDir string, args ...string) (string, error) {
 	cmd.Dir = packDir
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
+}
+
+// InteractivePrompt represents a detected interactive prompt from packwiz.
+type InteractivePrompt struct {
+	Prompt  string
+	Options []string
+	Output  string
+}
+
+// RunPackwizInteractive runs packwiz and detects if it's asking for interactive input.
+// Returns (output, prompt, error). If prompt is non-nil, user input is needed.
+func RunPackwizInteractive(packDir string, args ...string) (string, *InteractivePrompt, error) {
+	cmd := exec.Command("packwiz", args...)
+	cmd.Dir = packDir
+
+	// Capture combined output
+	output := &strings.Builder{}
+	cmd.Stdout = output
+	cmd.Stderr = output
+
+	// Start the command
+	if err := cmd.Start(); err != nil {
+		return "", nil, err
+	}
+
+	// Wait for command with timeout
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	// Give command time to complete
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+
+	select {
+	case err := <-done:
+		// Command finished
+		outputStr := output.String()
+		prompt := detectInteractivePrompt(outputStr)
+		if prompt != nil {
+			return outputStr, prompt, nil
+		}
+		return strings.TrimSpace(outputStr), nil, err
+
+	case <-timer.C:
+		// Timeout - check if it's waiting for input
+		outputStr := output.String()
+		prompt := detectInteractivePrompt(outputStr)
+		if prompt != nil {
+			// Interactive prompt detected
+			cmd.Process.Kill()
+			return outputStr, prompt, nil
+		}
+		// Not a prompt, just a slow command - keep waiting
+		err := <-done
+		return strings.TrimSpace(output.String()), nil, err
+	}
+}
+
+// RunPackwizWithInput runs packwiz with the given input string.
+func RunPackwizWithInput(packDir, input string, args ...string) (string, error) {
+	cmd := exec.Command("packwiz", args...)
+	cmd.Dir = packDir
+	cmd.Stdin = strings.NewReader(input + "\n")
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+// detectInteractivePrompt parses packwiz output to detect interactive prompts.
+func detectInteractivePrompt(output string) *InteractivePrompt {
+	lines := strings.Split(output, "\n")
+
+	// Look for numbered list patterns that indicate multiple choices
+	// Common patterns:
+	// [1] option1
+	// [2] option2
+	// Or:
+	// 1. option1
+	// 2. option2
+	var options []string
+	var promptLine string
+	inList := false
+	listStartIdx := -1
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+
+		// Check for patterns indicating multiple matches/options
+		if strings.Contains(lower, "multiple") && (strings.Contains(lower, "found") || strings.Contains(lower, "match")) {
+			promptLine = trimmed
+			inList = true
+			listStartIdx = i
+			continue
+		}
+
+		// Check if this is a numbered option: [1], [2], etc. or 1., 2., etc. or 0), 1), 2), etc.
+		if inList || (listStartIdx == -1 && (strings.HasPrefix(trimmed, "[1]") || strings.HasPrefix(trimmed, "1.") || strings.HasPrefix(trimmed, "0)") || strings.HasPrefix(trimmed, "1)"))) {
+			var option string
+			matched := false
+
+			// Pattern: [N] option or [N]: option
+			if strings.HasPrefix(trimmed, "[") {
+				if idx := strings.Index(trimmed, "]"); idx > 0 && idx < len(trimmed)-1 {
+					option = strings.TrimSpace(trimmed[idx+1:])
+					option = strings.TrimPrefix(option, ":")
+					option = strings.TrimSpace(option)
+					matched = true
+				}
+			} else if len(trimmed) > 2 && trimmed[0] >= '0' && trimmed[0] <= '9' && (trimmed[1] == '.' || trimmed[1] == ')') {
+				// Pattern: N. option or N) option (including 0)
+				option = strings.TrimSpace(trimmed[2:])
+				option = strings.TrimPrefix(option, "*") // Remove * prefix that marks default
+				option = strings.TrimSpace(option)
+				matched = true
+			}
+
+			if matched && option != "" {
+				options = append(options, option)
+				inList = true
+				if listStartIdx == -1 {
+					listStartIdx = i
+				}
+				continue
+			}
+		}
+
+		// Check if we've hit a selection prompt
+		if inList && len(options) > 0 {
+			if strings.Contains(lower, "select") || strings.Contains(lower, "choose") ||
+				strings.Contains(lower, "which") || strings.Contains(trimmed, "[1-") ||
+				strings.Contains(lower, "enter") && (strings.Contains(lower, "number") || strings.Contains(lower, "choice")) {
+				if promptLine == "" {
+					promptLine = trimmed
+				} else {
+					promptLine += " " + trimmed
+				}
+				break
+			}
+		}
+
+		// Stop collecting if we've moved past the list
+		if inList && len(options) > 0 && trimmed != "" && !strings.HasPrefix(trimmed, "[") &&
+			!(len(trimmed) > 0 && trimmed[0] >= '1' && trimmed[0] <= '9') {
+			// Might be the prompt
+			if strings.Contains(lower, "select") || strings.Contains(lower, "choose") {
+				promptLine = trimmed
+				break
+			}
+		}
+	}
+
+	// If we found options but no explicit prompt, create a default one
+	if len(options) > 0 {
+		if promptLine == "" {
+			promptLine = fmt.Sprintf("Select an option [1-%d]:", len(options))
+		}
+		return &InteractivePrompt{
+			Prompt:  promptLine,
+			Options: options,
+			Output:  output,
+		}
+	}
+
+	// Fallback: if we see common patterns like "Multiple" + "found/matches"
+	// even without numbered options, try to parse it
+	if strings.Contains(strings.ToLower(output), "multiple") &&
+		(strings.Contains(strings.ToLower(output), "found") ||
+			strings.Contains(strings.ToLower(output), "match")) {
+		// Create a basic prompt to let user know something needs selection
+		return &InteractivePrompt{
+			Prompt:  "Multiple matches found. Please re-run with more specific search.",
+			Options: []string{"OK"},
+			Output:  output,
+		}
+	}
+
+	return nil
 }
 
 // CloneRepo clones url into targetDir, returning combined output.

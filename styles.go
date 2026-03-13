@@ -64,6 +64,11 @@ var (
 				Bold(true).
 				PaddingLeft(1)
 
+	styleModItemDeleted = lipgloss.NewStyle().
+				Foreground(colorMuted).
+				Strikethrough(true).
+				PaddingLeft(1)
+
 	styleDeleteBtn = lipgloss.NewStyle().
 			Foreground(colorBg).
 			Background(colorDanger).
@@ -99,8 +104,7 @@ var (
 
 	styleModalTitle = lipgloss.NewStyle().
 			Foreground(colorAccent).
-			Bold(true).
-			MarginBottom(1)
+			Bold(true)
 
 	styleModalInput = lipgloss.NewStyle().
 			Foreground(colorText).
