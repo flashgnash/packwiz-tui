@@ -12,7 +12,13 @@
       nixpkgs,
       flake-utils,
     }:
-    flake-utils.lib.eachDefaultSystem (
+    {
+      # Overlay for easy integration into NixOS/home-manager
+      overlays.default = final: prev: {
+        packwiz-tui = self.packages.${final.system}.default;
+      };
+    }
+    // flake-utils.lib.eachDefaultSystem (
       system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
@@ -22,14 +28,10 @@
           version = "0.1.0";
           src = ./.;
 
-          # Run `nix build` with pkgs.lib.fakeHash first, then paste the
-          # "got:" hash printed in the error here.
-          vendorHash = pkgs.lib.fakeHash;
+          proxyVendor = true;
+          vendorHash = "sha256-aLGoqJqsB0S3lf9Kmt/nKZU5RdqxhoxE6D8a+Xr2qUc=";
 
-          nativeBuildInputs = [
-            pkgs.makeWrapper
-            pkgs.lazygit
-          ];
+          nativeBuildInputs = [ pkgs.makeWrapper ];
 
           postInstall = ''
             wrapProgram $out/bin/packwiz-tui \
@@ -37,12 +39,14 @@
                 pkgs.lib.makeBinPath [
                   pkgs.git
                   pkgs.packwiz
+                  pkgs.lazygit
                 ]
               }
           '';
 
           meta = with pkgs.lib; {
             description = "Terminal UI wrapper for packwiz Minecraft modpack management";
+            homepage = "https://github.com/flashgnash/packwiz-tui";
             license = licenses.mit;
             mainProgram = "packwiz-tui";
             platforms = platforms.unix;
