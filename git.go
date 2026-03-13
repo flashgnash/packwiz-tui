@@ -349,6 +349,46 @@ func GitCheckoutFile(repoRoot, filePath string) error {
 	return cmd.Run()
 }
 
+// GetModifiedFiles returns a map of file paths that have been modified according to git status.
+// GetDeletedFiles returns a map of file paths that have been deleted according to git status.
+func GetGitStatus(repoRoot string) (modified map[string]bool, deleted map[string]bool, err error) {
+	cmd := exec.Command("git", "status", "--porcelain")
+	cmd.Dir = repoRoot
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	modified = make(map[string]bool)
+	deleted = make(map[string]bool)
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		if len(line) < 4 {
+			continue
+		}
+		// Format: "XY filename" where X is staged, Y is unstaged
+		status := line[0:2]
+		filename := strings.TrimSpace(line[3:])
+		if filename == "" {
+			continue
+		}
+
+		// Convert to absolute path
+		absPath := filepath.Join(repoRoot, filename)
+
+		// Check if file is modified (M or A in first or second position)
+		if status[0] == 'M' || status[1] == 'M' || status[0] == 'A' || status[1] == 'A' {
+			modified[absPath] = true
+		}
+
+		// Check if file is deleted (D in first or second position)
+		if status[0] == 'D' || status[1] == 'D' {
+			deleted[absPath] = true
+		}
+	}
+	return modified, deleted, nil
+}
+
 // GitPushAll stages everything, commits, and pushes from repoRoot.
 func GitPushAll(repoRoot string) (string, error) {
 	run := func(args ...string) (string, error) {

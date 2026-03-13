@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -35,7 +36,11 @@ type msgPackFound struct {
 	repoRoot string
 }
 type msgPackError struct{ err error }
-type msgModsLoaded struct{ mods []ModFile }
+type msgModsLoaded struct {
+	mods     []ModFile
+	modified map[string]bool
+	deleted  map[string]bool
+}
 type msgCmdDone struct {
 	output string
 	err    error
@@ -47,6 +52,11 @@ type msgInteractivePrompt struct {
 }
 type msgSpinTick struct{}
 type msgStatusExpire struct{}
+type msgEditorDone struct {
+	err      error
+	filePath string
+	modTime  time.Time
+}
 
 // interactiveCmd holds state for a command waiting on user input.
 type interactiveCmd struct {
@@ -85,7 +95,8 @@ type App struct {
 	mods         []ModFile
 	modsFiltered []ModFile
 	modsIdx      int
-	modsDeleted  map[string]bool // track deleted mods by path
+	modsModified map[string]bool // track modified mods by path (from git)
+	modsDeleted  map[string]bool // track deleted mods by path (from git)
 	searchInput  textinput.Model
 	searchFocus  bool
 	addModModal  bool
@@ -136,12 +147,13 @@ func NewApp() *App {
 	addMod.Width = 40
 
 	return &App{
-		screen:      ScreenLoading,
-		loadingMsg:  "Detecting git repository…",
-		cloneInput:  clone,
-		searchInput: search,
-		addModInput: addMod,
-		modsDeleted: make(map[string]bool),
+		screen:       ScreenLoading,
+		loadingMsg:   "Detecting git repository…",
+		cloneInput:   clone,
+		searchInput:  search,
+		addModInput:  addMod,
+		modsDeleted:  make(map[string]bool),
+		modsModified: make(map[string]bool),
 	}
 }
 
@@ -234,7 +246,37 @@ func (a *App) loadMods() tea.Cmd {
 		if err != nil {
 			return msgCmdDone{output: err.Error(), err: err}
 		}
-		return msgModsLoaded{mods: mods}
+		// Get git status for modified and deleted files
+		modified, deleted, _ := GetGitStatus(a.repoRoot)
+
+		// Add deleted files to the mods list so they show up
+		modsDir := filepath.Join(a.packDir, "mods")
+		for deletedPath := range deleted {
+			// Only include files from the mods directory
+			if !strings.HasPrefix(deletedPath, modsDir) {
+				continue
+			}
+			// Check if already in list (shouldn't be, but just in case)
+			found := false
+			for _, m := range mods {
+				if m.Path == deletedPath {
+					found = true
+					break
+				}
+			}
+			if !found {
+				filename := filepath.Base(deletedPath)
+				if strings.HasSuffix(filename, ".toml") {
+					mods = append(mods, ModFile{
+						Name:     strings.TrimSuffix(filename, ".toml"),
+						Filename: filename,
+						Path:     deletedPath,
+					})
+				}
+			}
+		}
+
+		return msgModsLoaded{mods: mods, modified: modified, deleted: deleted}
 	}
 }
 
@@ -272,6 +314,35 @@ func (a *App) gitPush() tea.Cmd {
 
 func (a *App) expireStatus() tea.Cmd {
 	return tea.Tick(4*time.Second, func(time.Time) tea.Msg { return msgStatusExpire{} })
+}
+
+func (a *App) openInEditor(filePath string) tea.Cmd {
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		// Try common fallbacks
+		for _, e := range []string{"vim", "vi", "nano", "emacs"} {
+			if _, err := exec.LookPath(e); err == nil {
+				editor = e
+				break
+			}
+		}
+	}
+	if editor == "" {
+		return func() tea.Msg {
+			return msgEditorDone{err: fmt.Errorf("no editor found (set $EDITOR)"), filePath: filePath}
+		}
+	}
+
+	// Get modification time before opening
+	var modTime time.Time
+	if info, err := os.Stat(filePath); err == nil {
+		modTime = info.ModTime()
+	}
+
+	c := exec.Command(editor, filePath)
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		return msgEditorDone{err: err, filePath: filePath, modTime: modTime}
+	})
 }
 
 // ── Update ────────────────────────────────────────────────────────────────────
@@ -349,7 +420,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case msgModsLoaded:
 		a.mods = m.mods
-		a.modsDeleted = make(map[string]bool) // clear deleted tracking on reload
+		a.modsModified = m.modified
+		a.modsDeleted = m.deleted
 		a.filterMods()
 		a.screen = ScreenManageMods
 		return a, nil
@@ -374,6 +446,47 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.interactivePending = m.cmd
 		a.screen = ScreenInteractive
 		return a, nil
+
+	case msgEditorDone:
+		// Manually re-enable mouse mode after editor (tea.ExecProcess bug workaround)
+		restoreMouse := func() tea.Msg {
+			// Send ANSI escape codes to re-enable mouse tracking
+			fmt.Print("\033[?1000h")  // Enable mouse button tracking
+			fmt.Print("\033[?1003h")  // Enable all mouse motion tracking
+			fmt.Print("\033[?1006h")  // Enable SGR extended mouse mode
+			return tea.WindowSizeMsg{Width: a.width, Height: a.height}
+		}
+
+		if m.err != nil {
+			a.statusMsg = "Editor error: " + m.err.Error()
+			a.statusIsErr = true
+			a.statusExpire = time.Now().Add(4 * time.Second)
+			return a, tea.Batch(restoreMouse, a.expireStatus())
+		}
+
+		// Check if file was modified
+		fileChanged := false
+		if info, err := os.Stat(m.filePath); err == nil {
+			fileChanged = info.ModTime().After(m.modTime)
+		}
+
+		if fileChanged {
+			// Run packwiz refresh in background, then reload mods
+			go func() {
+				RunPackwiz(a.packDir, "refresh")
+			}()
+			a.statusMsg = "File saved, refreshing... (press r if mouse broken)"
+			a.statusIsErr = false
+			a.statusExpire = time.Now().Add(4 * time.Second)
+			// Reload mods to get updated list and git status
+			return a, tea.Batch(restoreMouse, a.expireStatus(), a.loadMods())
+		}
+
+		a.statusMsg = "No changes (press r if mouse broken)"
+		a.statusIsErr = false
+		a.statusExpire = time.Now().Add(4 * time.Second)
+		// Still reload to update git status
+		return a, tea.Batch(restoreMouse, a.expireStatus(), a.loadMods())
 	}
 
 	// Delegate to the active screen.
@@ -583,6 +696,13 @@ func (a *App) updateManageMods(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if a.searchFocus {
 				a.searchFocus = false
 				a.searchInput.Blur()
+			} else if len(a.modsFiltered) > 0 && a.modsIdx < len(a.modsFiltered) {
+				return a, a.openInEditor(a.modsFiltered[a.modsIdx].Path)
+			}
+		case "r":
+			if !a.searchFocus {
+				// Force reload to refresh git status and UI
+				return a, a.loadMods()
 			}
 		case "d":
 			if !a.searchFocus {
@@ -611,7 +731,7 @@ func (a *App) deleteMod() (tea.Model, tea.Cmd) {
 	}
 	mod := a.modsFiltered[a.modsIdx]
 
-	// Check if already deleted - if so, restore it
+	// Check if already deleted (according to git) - if so, restore it
 	if a.modsDeleted[mod.Path] {
 		if err := GitCheckoutFile(a.repoRoot, mod.Path); err != nil {
 			a.statusMsg = "Restore failed: " + err.Error()
@@ -619,16 +739,15 @@ func (a *App) deleteMod() (tea.Model, tea.Cmd) {
 			a.statusExpire = time.Now().Add(4 * time.Second)
 			return a, a.expireStatus()
 		}
-		// Remove from deleted tracking
-		delete(a.modsDeleted, mod.Path)
-		// Run packwiz refresh silently
+		// Run packwiz refresh and reload
 		go func() {
 			RunPackwiz(a.packDir, "refresh")
 		}()
 		a.statusMsg = "Restored " + mod.Name
 		a.statusIsErr = false
-		a.statusExpire = time.Now().Add(4 * time.Second)
-		return a, a.expireStatus()
+		a.statusExpire = time.Now().Add(2 * time.Second)
+		// Reload to update git status
+		return a, tea.Batch(a.expireStatus(), a.loadMods())
 	}
 
 	// Not deleted, so delete it
@@ -638,12 +757,15 @@ func (a *App) deleteMod() (tea.Model, tea.Cmd) {
 		a.statusExpire = time.Now().Add(4 * time.Second)
 		return a, a.expireStatus()
 	}
-	// Mark as deleted and run packwiz refresh silently
-	a.modsDeleted[mod.Path] = true
+	// Run packwiz refresh and reload
 	go func() {
 		RunPackwiz(a.packDir, "refresh")
 	}()
-	return a, nil
+	a.statusMsg = "Deleted " + mod.Name
+	a.statusIsErr = false
+	a.statusExpire = time.Now().Add(2 * time.Second)
+	// Reload to update git status
+	return a, tea.Batch(a.expireStatus(), a.loadMods())
 }
 
 func (a *App) updateOutput(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -769,7 +891,7 @@ func (a *App) viewStatusBar() string {
 	case ScreenMainMenu:
 		hints = []string{"↑↓ navigate", "enter select", "1-4 shortcut", "q quit"}
 	case ScreenManageMods:
-		hints = []string{"/ search", "n add", "d delete/restore", "esc back"}
+		hints = []string{"enter edit", "r refresh", "/ search", "n add", "d delete/restore", "esc back"}
 	case ScreenOutput:
 		if a.outputDone {
 			hints = []string{"enter continue"}
