@@ -129,11 +129,15 @@ func (a *App) viewManageMods() string {
 	addHint := "  " + styleAddBtn.Render("[+]") + " " + styleSubtitle.Render("ctrl+n")
 	searchRow := lipgloss.JoinHorizontal(lipgloss.Left, searchBar, addHint)
 
-	// Mod list
-	listH := a.height - 10
+	// Chrome above the list: topPad(1) + header(1) + blank(1) + searchRow(3) + blank(1) + status(1) = 8
+	// The panel .Height() excludes its own borders so add 0 for those here.
+	// Empirically verified: 8 leaves the panel border visible with one row of top padding.
+	const reservedRows = 11
+	listH := a.height - reservedRows
 	if listH < 4 {
 		listH = 4
 	}
+
 	var rows []string
 	if len(a.modsFiltered) == 0 {
 		rows = append(rows, styleSubtitle.Render("  no mods found"))
@@ -153,19 +157,27 @@ func (a *App) viewManageMods() string {
 	visible := rows[start:end]
 
 	panelW := clamp(64, 40, a.width-4)
-	panel := stylePanelFocused.Width(panelW).Render(strings.Join(visible, "\n"))
 
-	content := lipgloss.JoinVertical(lipgloss.Left,
+	// Set explicit height so the panel never grows beyond the terminal.
+	panel := stylePanelFocused.Width(panelW).Height(listH).Render(strings.Join(visible, "\n"))
+
+	content := "\n\n\n" + lipgloss.JoinVertical(lipgloss.Left,
 		header, "", searchRow, "", panel,
 	)
 
-	if a.addModModal {
-		return a.renderWithModal(content, a.viewAddModModal())
+	// Center horizontally, pin to top with 1 row padding.
+	contentW := lipgloss.Width(content)
+	leftPad := (a.width - contentW) / 2
+	if leftPad < 0 {
+		leftPad = 0
 	}
 
-	return lipgloss.Place(a.width, a.height-1, lipgloss.Center, lipgloss.Top,
-		lipgloss.NewStyle().MarginTop(2).Render(content),
-	)
+	if a.addModModal {
+		placed := lipgloss.NewStyle().PaddingLeft(leftPad).Render(content)
+		return a.renderWithModal(placed, a.viewAddModModal())
+	}
+
+	return lipgloss.NewStyle().PaddingLeft(leftPad).Render(content)
 }
 
 func (a *App) viewAddModModal() string {

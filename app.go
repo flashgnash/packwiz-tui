@@ -600,6 +600,10 @@ func (a *App) View() string {
 	}
 
 	statusBar := a.viewStatusBar()
+	// For the mods screen the view manages its own height, so don't clip it.
+	if a.screen == ScreenManageMods {
+		return lipgloss.JoinVertical(lipgloss.Left, body, statusBar)
+	}
 	bodyH := a.height - lipgloss.Height(statusBar)
 	if bodyH < 0 {
 		bodyH = 0
@@ -629,35 +633,40 @@ func (a *App) viewStatusBar() string {
 		}
 	}
 
-	left := ""
-	for i, h := range hints {
-		if i > 0 {
-			left += " " + styleStatusSep.Render("│") + " "
-		}
+	// Render each hint as "key desc" with a separator between them.
+	sep := "  " + styleStatusSep.Render("│") + "  "
+	mutedStyle := lipgloss.NewStyle().Foreground(colorMuted)
+	var rendered []string
+	for _, h := range hints {
 		idx := strings.Index(h, " ")
 		if idx > 0 {
-			left += styleStatusKey.Render(h[:idx]) + styleStatusBar.Render(h[idx:])
+			rendered = append(rendered, styleStatusKey.Render(h[:idx])+mutedStyle.Render(h[idx:]))
 		} else {
-			left += styleStatusBar.Render(h)
+			rendered = append(rendered, mutedStyle.Render(h))
 		}
 	}
 
 	var right string
 	if a.statusMsg != "" {
 		if a.statusIsErr {
-			right = styleOutputError.Render("✗ " + a.statusMsg)
+			right = lipgloss.NewStyle().Foreground(colorDanger).Render("✗ " + a.statusMsg)
 		} else {
-			right = styleOutputSuccess.Render("✓ " + a.statusMsg)
+			right = lipgloss.NewStyle().Foreground(colorSuccess).Render("✓ " + a.statusMsg)
 		}
 	} else if a.packName != "" {
-		right = styleStatusBar.Render("pack: ") + styleHighlight.Render(a.packName)
+		right = mutedStyle.Render("pack: ") + styleHighlight.Render(a.packName)
 	}
 
+	left := strings.Join(rendered, sep)
 	gap := a.width - lipgloss.Width(left) - lipgloss.Width(right) - 2
 	if gap < 0 {
 		gap = 0
 	}
-	return styleStatusBar.Width(a.width).Render(left + strings.Repeat(" ", gap) + right)
+
+	return lipgloss.NewStyle().
+		Background(colorBgPanel).
+		Width(a.width).
+		Render(left + strings.Repeat(" ", gap) + right)
 }
 
 // ── Parsing ───────────────────────────────────────────────────────────────────
