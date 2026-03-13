@@ -652,10 +652,7 @@ func (a *App) viewStatusBar() string {
 		gap = 0
 	}
 
-	return lipgloss.NewStyle().
-		Background(colorBgPanel).
-		Width(a.width).
-		Render(left + strings.Repeat(" ", gap) + right)
+	return left + strings.Repeat(" ", gap) + right
 }
 
 // ── Parsing ───────────────────────────────────────────────────────────────────

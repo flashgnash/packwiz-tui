@@ -91,9 +91,9 @@ func (a *App) viewMainMenu() string {
 		num := styleStatusSep.Render(fmt.Sprintf("[%d]", i+1))
 		var line string
 		if i == a.menuIdx {
-			line = styleMenuItemSelected.Render(styleMenuItemIcon.Render(item.icon) + " " + item.label)
+			line = styleMenuItemSelected.Render(" " + item.icon + "  " + item.label + " ")
 		} else {
-			line = styleMenuItem.Render(styleMuted(item.icon) + " " + item.label)
+			line = styleMenuItem.Render(" " + item.icon + "  " + item.label + " ")
 		}
 		rows = append(rows, num+" "+line, "")
 	}
@@ -143,16 +143,14 @@ func (a *App) viewManageMods() string {
 	}
 	rowW := panelW - 2 // subtract panel border padding
 	for i, mod := range a.modsFiltered {
-		del := styleMuted("[-]")
 		delW := lipgloss.Width("[-]")
 		nameW := rowW - delW - 2
 		name := truncate(mod.Name, nameW)
 		namePadded := name + strings.Repeat(" ", nameW-lipgloss.Width(name))
 		if i == a.modsIdx {
-			del = styleDeleteBtn.Render("[-]")
-			rows = append(rows, styleModItemSelected.Render(namePadded)+" "+del)
+			rows = append(rows, styleModItemSelected.Render(namePadded+" [-]"))
 		} else {
-			rows = append(rows, styleModItem.Render(namePadded)+" "+del)
+			rows = append(rows, styleModItem.Render(namePadded)+" "+styleDeleteBtn.Render("[-]"))
 		}
 	}
 

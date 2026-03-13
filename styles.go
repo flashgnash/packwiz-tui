@@ -43,16 +43,12 @@ var (
 				Padding(0, 1)
 
 	styleMenuItem = lipgloss.NewStyle().
-			Foreground(colorText).
-			PaddingLeft(2).
-			PaddingRight(2)
+			Foreground(colorMuted)
 
 	styleMenuItemSelected = lipgloss.NewStyle().
 				Foreground(colorAccent).
 				Background(colorBgHover).
-				Bold(true).
-				PaddingLeft(2).
-				PaddingRight(2)
+				Bold(true)
 
 	styleMenuItemIcon = lipgloss.NewStyle().
 				Foreground(colorAccent).
