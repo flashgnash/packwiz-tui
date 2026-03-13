@@ -26,7 +26,10 @@
           # "got:" hash printed in the error here.
           vendorHash = pkgs.lib.fakeHash;
 
-          nativeBuildInputs = [ pkgs.makeWrapper ];
+          nativeBuildInputs = [
+            pkgs.makeWrapper
+            pkgs.lazygit
+          ];
 
           postInstall = ''
             wrapProgram $out/bin/packwiz-tui \
@@ -66,6 +69,7 @@
             delve
             git
             packwiz
+            lazygit
           ];
           shellHook = ''
             echo ""

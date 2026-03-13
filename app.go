@@ -59,6 +59,7 @@ type msgEditorDone struct {
 	filePath string
 	modTime  time.Time
 }
+type msgLazygitDone struct{ err error }
 
 // interactiveCmd holds state for a command waiting on user input.
 type interactiveCmd struct {
@@ -333,6 +334,21 @@ func (a *App) expireStatus() tea.Cmd {
 	return tea.Tick(4*time.Second, func(time.Time) tea.Msg { return msgStatusExpire{} })
 }
 
+func (a *App) openLazygit() tea.Cmd {
+	// Check if lazygit is installed
+	if _, err := exec.LookPath("lazygit"); err != nil {
+		return func() tea.Msg {
+			return msgLazygitDone{err: fmt.Errorf("lazygit not found (install from https://github.com/jesseduffield/lazygit)")}
+		}
+	}
+
+	c := exec.Command("lazygit")
+	c.Dir = a.repoRoot
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		return msgLazygitDone{err: err}
+	})
+}
+
 func (a *App) openInEditor(filePath string) tea.Cmd {
 	editor := os.Getenv("EDITOR")
 	if editor == "" {
@@ -505,6 +521,28 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.statusExpire = time.Now().Add(4 * time.Second)
 		// Still reload to update git status
 		return a, tea.Batch(restoreMouse, a.expireStatus(), a.loadMods())
+
+	case msgLazygitDone:
+		// Manually re-enable mouse mode after lazygit
+		restoreMouse := func() tea.Msg {
+			fmt.Print("\033[?1000h")
+			fmt.Print("\033[?1003h")
+			fmt.Print("\033[?1006h")
+			return tea.WindowSizeMsg{Width: a.width, Height: a.height}
+		}
+
+		if m.err != nil {
+			a.statusMsg = "Lazygit error: " + m.err.Error()
+			a.statusIsErr = true
+			a.statusExpire = time.Now().Add(4 * time.Second)
+			return a, tea.Batch(restoreMouse, a.expireStatus())
+		}
+
+		// Reload mods to get updated git status
+		a.statusMsg = "Lazygit closed, refreshing..."
+		a.statusIsErr = false
+		a.statusExpire = time.Now().Add(2 * time.Second)
+		return a, tea.Batch(restoreMouse, a.expireStatus(), a.loadMods())
 	}
 
 	// Delegate to the active screen.
@@ -613,6 +651,8 @@ func (a *App) updateMainMenu(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "4":
 		a.menuIdx = 3
 		return a.activateMenuItem()
+	case "g":
+		return a, a.openLazygit()
 	case "enter", " ":
 		return a.activateMenuItem()
 	}
@@ -721,6 +761,10 @@ func (a *App) updateManageMods(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !a.searchFocus {
 				// Force reload to refresh git status and UI
 				return a, a.loadMods()
+			}
+		case "g":
+			if !a.searchFocus {
+				return a, a.openLazygit()
 			}
 		case "d":
 			if !a.searchFocus {
@@ -907,9 +951,9 @@ func (a *App) viewStatusBar() string {
 	case ScreenCloneRepo:
 		hints = []string{"enter clone", "esc back", "ctrl+c quit"}
 	case ScreenMainMenu:
-		hints = []string{"↑↓ navigate", "enter select", "1-4 shortcut", "q quit"}
+		hints = []string{"↑↓ navigate", "enter select", "1-4 shortcut", "g lazygit", "q quit"}
 	case ScreenManageMods:
-		hints = []string{"enter edit", "r refresh", "/ search", "n add", "d delete/restore", "esc back"}
+		hints = []string{"enter edit", "g lazygit", "r refresh", "/ search", "n add", "d delete/restore", "esc back"}
 	case ScreenOutput:
 		if a.outputDone {
 			hints = []string{"enter continue"}
