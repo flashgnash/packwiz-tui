@@ -26,27 +26,27 @@ func (a *App) viewRepoSelect() string {
 	rows = append(rows, styleTitle.Render("  Recent Repositories"), "")
 
 	for i, repo := range a.repoList {
-		icon := "   "
-		style := styleRepoItem
 		if i == a.repoListIdx {
-			icon = " " + styleMenuItemIcon.Render("▶") + " "
-			style = styleRepoItemSelected
+			rows = append(rows,
+				styleRepoItemSelected.Render(" ▶  "+repo.Name),
+				styleRepoPath.Render("     "+truncate(repo.Path, 56)),
+				"",
+			)
+		} else {
+			rows = append(rows,
+				styleRepoItem.Render("    "+repo.Name),
+				styleRepoPath.Render("     "+truncate(repo.Path, 56)),
+				"",
+			)
 		}
-		rows = append(rows,
-			style.Render(icon+repo.Name),
-			styleRepoPath.Render("     "+truncate(repo.Path, 56)),
-			"",
-		)
 	}
 
 	// Clone new entry
-	cloneStyle := styleRepoItem
-	cloneIcon := "   "
 	if a.repoListIdx == len(a.repoList) {
-		cloneIcon = " " + styleMenuItemIcon.Render("▶") + " "
-		cloneStyle = styleRepoItemSelected
+		rows = append(rows, styleRepoItemSelected.Render(" ▶  + Clone new repository"))
+	} else {
+		rows = append(rows, styleRepoItem.Render("    ")+styleAddBtn.Render("+ Clone new repository"))
 	}
-	rows = append(rows, cloneStyle.Render(cloneIcon+styleAddBtn.Render("+ Clone new repository")))
 
 	panelW := clamp(70, 40, a.width-4)
 	panel := stylePanelFocused.Width(panelW).Render(strings.Join(rows, "\n"))

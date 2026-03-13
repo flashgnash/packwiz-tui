@@ -116,14 +116,12 @@ var (
 			Foreground(colorMuted)
 
 	styleRepoItem = lipgloss.NewStyle().
-			Foreground(colorText).
-			PaddingLeft(2)
+			Foreground(colorText)
 
 	styleRepoItemSelected = lipgloss.NewStyle().
 				Foreground(colorAccent).
 				Background(colorBgHover).
-				Bold(true).
-				PaddingLeft(2)
+				Bold(true)
 
 	styleRepoPath = lipgloss.NewStyle().
 			Foreground(colorMuted)
