@@ -293,8 +293,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							var idx int
 							fmt.Sscanf(z.action, "del:%d", &idx)
 							if idx < len(a.modsFiltered) {
+								// Temporarily set index for deleteMod to work on the right item
+								oldIdx := a.modsIdx
 								a.modsIdx = idx
-								return a.deleteMod()
+								model, cmd := a.deleteMod()
+								// Restore original selection to prevent jumping
+								a.modsIdx = oldIdx
+								return model, cmd
 							}
 						} else if strings.HasPrefix(z.action, "menu:") {
 							var idx int
@@ -605,6 +610,28 @@ func (a *App) deleteMod() (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 	mod := a.modsFiltered[a.modsIdx]
+
+	// Check if already deleted - if so, restore it
+	if a.modsDeleted[mod.Path] {
+		if err := GitCheckoutFile(a.repoRoot, mod.Path); err != nil {
+			a.statusMsg = "Restore failed: " + err.Error()
+			a.statusIsErr = true
+			a.statusExpire = time.Now().Add(4 * time.Second)
+			return a, a.expireStatus()
+		}
+		// Remove from deleted tracking
+		delete(a.modsDeleted, mod.Path)
+		// Run packwiz refresh silently
+		go func() {
+			RunPackwiz(a.packDir, "refresh")
+		}()
+		a.statusMsg = "Restored " + mod.Name
+		a.statusIsErr = false
+		a.statusExpire = time.Now().Add(4 * time.Second)
+		return a, a.expireStatus()
+	}
+
+	// Not deleted, so delete it
 	if err := os.Remove(mod.Path); err != nil {
 		a.statusMsg = "Delete failed: " + err.Error()
 		a.statusIsErr = true
@@ -742,7 +769,7 @@ func (a *App) viewStatusBar() string {
 	case ScreenMainMenu:
 		hints = []string{"↑↓ navigate", "enter select", "1-4 shortcut", "q quit"}
 	case ScreenManageMods:
-		hints = []string{"/ search", "n add", "d delete", "esc back"}
+		hints = []string{"/ search", "n add", "d delete/restore", "esc back"}
 	case ScreenOutput:
 		if a.outputDone {
 			hints = []string{"enter continue"}

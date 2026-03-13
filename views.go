@@ -200,15 +200,9 @@ func (a *App) viewManageMods() string {
 
 		var del string
 		if isDeleted {
-			del = styleMuted("   ") // empty space instead of button
+			del = styleAddBtn.Render(" + ")
 		} else {
 			del = styleDeleteBtn.Render(delStr)
-			// Only register click zone for non-deleted mods
-			delX := panelX + innerW - delW + 2
-			a.clickZones = append(a.clickZones, clickZone{
-				x: delX, y: listY + i, w: delW, h: 1,
-				action: fmt.Sprintf("del:%d", i),
-			})
 		}
 
 		var line string
@@ -224,6 +218,18 @@ func (a *App) viewManageMods() string {
 
 	start, end := visibleWindow(a.modsIdx, len(rows), listH)
 	visible := rows[start:end]
+
+	// Register click zones only for visible items
+	delX := panelX + innerW - delW + 2
+	for row := 0; row < len(visible); row++ {
+		absoluteIdx := start + row
+		if absoluteIdx < len(a.modsFiltered) {
+			a.clickZones = append(a.clickZones, clickZone{
+				x: delX, y: listY + row, w: delW, h: 1,
+				action: fmt.Sprintf("del:%d", absoluteIdx),
+			})
+		}
+	}
 
 	// Set explicit height so the panel never grows beyond the terminal.
 	panel := stylePanelFocused.Width(panelW).Height(listH).Render(strings.Join(visible, "\n"))

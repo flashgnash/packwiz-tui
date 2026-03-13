@@ -342,6 +342,13 @@ func CloneRepo(url, targetDir string) (string, error) {
 	return string(out), err
 }
 
+// GitCheckoutFile restores a deleted file using git checkout.
+func GitCheckoutFile(repoRoot, filePath string) error {
+	cmd := exec.Command("git", "checkout", "--", filePath)
+	cmd.Dir = repoRoot
+	return cmd.Run()
+}
+
 // GitPushAll stages everything, commits, and pushes from repoRoot.
 func GitPushAll(repoRoot string) (string, error) {
 	run := func(args ...string) (string, error) {
