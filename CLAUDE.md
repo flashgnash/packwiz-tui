@@ -26,6 +26,12 @@ The project requires:
 - `git` (for repository operations)
 - Go 1.21+
 
+**Important:** When adding or removing Go dependencies (via `go get`), you must update the Nix build hash:
+```bash
+./update-hash.sh
+```
+This script automatically updates the `vendorHash` in `flake.nix` to match the new Go modules.
+
 ## Architecture
 
 ### Bubble Tea Pattern
