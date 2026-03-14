@@ -428,19 +428,22 @@ func (a *App) viewInteractive() string {
 	if isYesNo {
 		// Horizontal layout for yes/no prompts
 		promptLines := strings.Split(a.interactivePrompt, "\n")
+		panelW := clamp(64, 40, a.width-4)
+
 		var rows []string
 
-		// Show the prompt text with proper formatting
+		// Show the prompt text centered
 		for _, line := range promptLines {
 			trimmed := strings.TrimSpace(line)
 			if trimmed != "" {
-				rows = append(rows, styleSubtitle.Render(trimmed))
+				centered := lipgloss.Place(panelW-4, 1, lipgloss.Center, lipgloss.Top, styleSubtitle.Render(trimmed))
+				rows = append(rows, centered)
 			}
 		}
 
 		rows = append(rows, "", "")
 
-		// Show Yes/No options horizontally
+		// Show Yes/No options horizontally, centered
 		var yesBtn, noBtn string
 		if a.interactiveSelected == 0 {
 			yesBtn = styleMenuItemSelected.Render("  Yes  ")
@@ -451,9 +454,9 @@ func (a *App) viewInteractive() string {
 		}
 
 		buttonRow := lipgloss.JoinHorizontal(lipgloss.Left, yesBtn, "   ", noBtn)
-		rows = append(rows, buttonRow)
+		centeredButtons := lipgloss.Place(panelW-4, 1, lipgloss.Center, lipgloss.Top, buttonRow)
+		rows = append(rows, centeredButtons)
 
-		panelW := clamp(64, 40, a.width-4)
 		panelContent := strings.Join(rows, "\n")
 		panel := stylePanelFocused.Width(panelW).Render(panelContent)
 

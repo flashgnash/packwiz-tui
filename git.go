@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -216,6 +217,22 @@ func RunPackwizInteractive(packDir string, args ...string) (string, *Interactive
 	}
 }
 
+// stripANSI removes ANSI escape codes and control characters from a string
+func stripANSI(str string) string {
+	// Remove ANSI escape sequences
+	ansiRegex := regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+	str = ansiRegex.ReplaceAllString(str, "")
+
+	// Remove other control characters except newlines and tabs
+	str = regexp.MustCompile(`[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]`).ReplaceAllString(str, "")
+
+	// Clean up carriage returns
+	str = strings.ReplaceAll(str, "\r\n", "\n")
+	str = strings.ReplaceAll(str, "\r", "")
+
+	return str
+}
+
 // RunPackwizWithInput runs packwiz with the given input string using a pseudo-terminal.
 // This allows interaction with programs that read from /dev/tty instead of stdin.
 // Returns (output, prompt, error). If prompt is non-nil, additional input is needed.
@@ -277,13 +294,14 @@ func RunPackwizWithInput(packDir, input string, args ...string) (string, *Intera
 		case chunk, ok := <-outputChan:
 			if !ok {
 				// Output channel closed, command finished
-				outputStr := strings.Join(outputLines, "")
+				outputStr := stripANSI(strings.Join(outputLines, ""))
 				return strings.TrimSpace(outputStr), nil, nil
 			}
 
 			outputLines = append(outputLines, chunk)
 			currentOutput := strings.Join(outputLines, "")
-			lowerOutput := strings.ToLower(currentOutput)
+			cleanOutput := stripANSI(currentOutput)
+			lowerOutput := strings.ToLower(cleanOutput)
 
 			// Check for y/n prompt immediately (but only if we haven't already answered)
 			if !alreadyAnswered && (strings.Contains(lowerOutput, "[y/n]") ||
@@ -293,7 +311,7 @@ func RunPackwizWithInput(packDir, input string, args ...string) (string, *Intera
 				cmd.Process.Kill()
 
 				// Extract the prompt with context
-				lines := strings.Split(strings.TrimSpace(currentOutput), "\n")
+				lines := strings.Split(strings.TrimSpace(cleanOutput), "\n")
 				var promptLines []string
 
 				foundPrompt := false
@@ -316,17 +334,17 @@ func RunPackwizWithInput(packDir, input string, args ...string) (string, *Intera
 					}
 				}
 
-				return currentOutput, &InteractivePrompt{
+				return cleanOutput, &InteractivePrompt{
 					Prompt:  strings.Join(promptLines, "\n"),
 					Options: []string{"Yes", "No"},
-					Output:  currentOutput,
+					Output:  cleanOutput,
 				}, nil
 			}
 
 		case <-done:
 			// Command finished
 			time.Sleep(50 * time.Millisecond) // Give output channel time to drain
-			outputStr := strings.Join(outputLines, "")
+			outputStr := stripANSI(strings.Join(outputLines, ""))
 			return strings.TrimSpace(outputStr), nil, nil
 		}
 	}
