@@ -50,6 +50,7 @@ type msgCmdDone struct {
 type msgInteractivePrompt struct {
 	prompt  string
 	options []string
+	sources []string
 	cmd     *interactiveCmd
 }
 type msgSpinTick struct{}
@@ -115,6 +116,7 @@ type App struct {
 	// Interactive prompt
 	interactivePrompt   string
 	interactiveOptions  []string
+	interactiveSources  []string // Track source for each option
 	interactiveSelected int
 	interactivePending  *interactiveCmd
 
@@ -301,12 +303,33 @@ func (a *App) loadMods() tea.Cmd {
 
 func (a *App) runPackwiz(args ...string) tea.Cmd {
 	return func() tea.Msg {
+		// Check if this is a mod search command - use combined search
+		if len(args) >= 3 && args[1] == "add" && (args[0] == "mr" || args[0] == "cf") {
+			modName := args[2]
+			out, prompt, err := RunBothPackwizSearches(a.packDir, modName)
+			if prompt != nil {
+				return msgInteractivePrompt{
+					prompt:  prompt.Prompt,
+					options: prompt.Options,
+					sources: prompt.Sources,
+					cmd: &interactiveCmd{
+						packDir: a.packDir,
+						args:    args,
+						input:   "", // Will be determined based on selection
+					},
+				}
+			}
+			return msgCmdDone{output: out, err: err}
+		}
+
+		// Normal packwiz command
 		out, prompt, err := RunPackwizInteractive(a.packDir, args...)
 		if prompt != nil {
 			// Interactive prompt detected
 			return msgInteractivePrompt{
 				prompt:  prompt.Prompt,
 				options: prompt.Options,
+				sources: prompt.Sources,
 				cmd: &interactiveCmd{
 					packDir: a.packDir,
 					args:    args,
@@ -326,6 +349,7 @@ func (a *App) runPackwizWithInput(input string, cmd *interactiveCmd) tea.Cmd {
 			return msgInteractivePrompt{
 				prompt:  prompt.Prompt,
 				options: prompt.Options,
+				sources: prompt.Sources,
 				cmd: &interactiveCmd{
 					packDir: cmd.packDir,
 					args:    cmd.args,
@@ -497,7 +521,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case msgInteractivePrompt:
 		a.interactivePrompt = m.prompt
 		a.interactiveOptions = m.options
+		a.interactiveSources = m.sources
 		a.interactiveSelected = 0
+		// Skip headers in initial selection
+		for a.interactiveSelected < len(a.interactiveOptions) &&
+		    a.interactiveSelected < len(a.interactiveSources) &&
+		    a.interactiveSources[a.interactiveSelected] == "header" {
+			a.interactiveSelected++
+		}
 		a.interactivePending = m.cmd
 		a.screen = ScreenInteractive
 		return a, nil
@@ -907,10 +938,22 @@ func (a *App) updateInteractive(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "up", "k":
 		if !isYesNo && a.interactiveSelected > 0 {
 			a.interactiveSelected--
+			// Skip headers
+			for a.interactiveSelected > 0 &&
+			    a.interactiveSelected < len(a.interactiveSources) &&
+			    a.interactiveSources[a.interactiveSelected] == "header" {
+				a.interactiveSelected--
+			}
 		}
 	case "down", "j":
 		if !isYesNo && a.interactiveSelected < len(a.interactiveOptions)-1 {
 			a.interactiveSelected++
+			// Skip headers
+			for a.interactiveSelected < len(a.interactiveOptions)-1 &&
+			    a.interactiveSelected < len(a.interactiveSources) &&
+			    a.interactiveSources[a.interactiveSelected] == "header" {
+				a.interactiveSelected++
+			}
 		}
 	case "left", "h":
 		if isYesNo && a.interactiveSelected > 0 {
@@ -938,9 +981,41 @@ func (a *App) updateInteractive(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// If not a y/n prompt, use numeric selection (0-indexed, 0 means cancel in packwiz)
+		// If not a y/n prompt, handle source-based selection
 		if selection == "" {
-			selection = fmt.Sprintf("%d", a.interactiveSelected)
+			// Check if we have sources (combined modrinth/curseforge search)
+			if len(a.interactiveSources) > 0 && a.interactiveSelected < len(a.interactiveSources) {
+				source := a.interactiveSources[a.interactiveSelected]
+
+				// Update command args to use the correct source
+				if source == "modrinth" || source == "curseforge" {
+					// Calculate the index within the source's options (skip headers)
+					sourceIndex := 0
+					for i := 0; i < a.interactiveSelected; i++ {
+						if a.interactiveSources[i] == source {
+							sourceIndex++
+						}
+					}
+
+					// Update args to use correct source command
+					updatedArgs := make([]string, len(a.interactivePending.args))
+					copy(updatedArgs, a.interactivePending.args)
+					if source == "modrinth" {
+						updatedArgs[0] = "mr"
+					} else {
+						updatedArgs[0] = "cf"
+					}
+					a.interactivePending.args = updatedArgs
+
+					selection = fmt.Sprintf("%d", sourceIndex)
+				} else {
+					// Regular numeric selection (0-indexed, 0 means cancel in packwiz)
+					selection = fmt.Sprintf("%d", a.interactiveSelected)
+				}
+			} else {
+				// No sources, use regular numeric selection
+				selection = fmt.Sprintf("%d", a.interactiveSelected)
+			}
 		}
 
 		// Combine with previous input if this is a chained prompt

@@ -164,6 +164,91 @@ type InteractivePrompt struct {
 	Prompt  string
 	Options []string
 	Output  string
+	Sources []string // Track which source each option came from (e.g., "modrinth", "curseforge")
+}
+
+// RunBothPackwizSearches runs modrinth search first, and only runs curseforge if needed.
+// Returns a combined prompt with results from both sources if needed.
+func RunBothPackwizSearches(packDir, modName string) (string, *InteractivePrompt, error) {
+	// Run modrinth search first
+	mrOut, mrPrompt, mrErr := RunPackwizInteractive(packDir, "mr", "add", modName)
+
+	// If modrinth succeeded without needing user input, return it directly
+	// (Only skip curseforge if modrinth succeeded AND has no prompt)
+	if mrPrompt == nil && mrErr == nil {
+		// Success with single match, auto-added
+		return mrOut, nil, mrErr
+	}
+
+	// Modrinth needs user input (multiple matches), so also run curseforge
+	type result struct {
+		output string
+		prompt *InteractivePrompt
+		err    error
+	}
+
+	cfResult := make(chan result, 1)
+	go func() {
+		out, prompt, err := RunPackwizInteractive(packDir, "cf", "add", modName)
+		cfResult <- result{out, prompt, err}
+	}()
+
+	// Wait for curseforge result
+	cf := <-cfResult
+
+	// Now combine both results
+	var modrinthResult = struct {
+		output string
+		prompt *InteractivePrompt
+		err    error
+	}{mrOut, mrPrompt, mrErr}
+	var curseforgeResult = cf
+
+	// Combine the results
+	var combinedOptions []string
+	var combinedSources []string
+	var combinedOutput strings.Builder
+
+	// Add Modrinth results
+	if modrinthResult.prompt != nil && len(modrinthResult.prompt.Options) > 0 {
+		combinedOptions = append(combinedOptions, "=== Modrinth ===")
+		combinedSources = append(combinedSources, "header")
+		for _, opt := range modrinthResult.prompt.Options {
+			combinedOptions = append(combinedOptions, opt)
+			combinedSources = append(combinedSources, "modrinth")
+		}
+		combinedOutput.WriteString("=== Modrinth ===\n")
+		combinedOutput.WriteString(modrinthResult.output)
+		combinedOutput.WriteString("\n\n")
+	}
+
+	// Add CurseForge results
+	if curseforgeResult.prompt != nil && len(curseforgeResult.prompt.Options) > 0 {
+		combinedOptions = append(combinedOptions, "=== CurseForge ===")
+		combinedSources = append(combinedSources, "header")
+		for _, opt := range curseforgeResult.prompt.Options {
+			// Strip the last set of parentheses (description) from CurseForge options
+			cleanOpt := opt
+			if lastParen := strings.LastIndex(cleanOpt, "("); lastParen != -1 {
+				cleanOpt = strings.TrimSpace(cleanOpt[:lastParen])
+			}
+			combinedOptions = append(combinedOptions, cleanOpt)
+			combinedSources = append(combinedSources, "curseforge")
+		}
+		combinedOutput.WriteString("=== CurseForge ===\n")
+		combinedOutput.WriteString(curseforgeResult.output)
+	}
+
+	if len(combinedOptions) == 0 {
+		return "No results found in either Modrinth or CurseForge", nil, fmt.Errorf("no results found")
+	}
+
+	return combinedOutput.String(), &InteractivePrompt{
+		Prompt:  "Select a mod from Modrinth or CurseForge:",
+		Options: combinedOptions,
+		Sources: combinedSources,
+		Output:  combinedOutput.String(),
+	}, nil
 }
 
 // RunPackwizInteractive runs packwiz and detects if it's asking for interactive input.

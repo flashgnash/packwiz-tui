@@ -473,14 +473,25 @@ func (a *App) viewInteractive() string {
 	rows = append(rows, "")
 
 	for i, opt := range a.interactiveOptions {
-		num := fmt.Sprintf("[%d]", i)
-		var line string
-		if i == a.interactiveSelected {
-			line = styleMenuItemSelected.Render(" " + num + " " + opt)
+		// Check if this is a header
+		isHeader := i < len(a.interactiveSources) && a.interactiveSources[i] == "header"
+
+		if isHeader {
+			// Render as a section header, not selectable
+			headerStyle := lipgloss.NewStyle().
+				Foreground(colorAccent).
+				Bold(true)
+			rows = append(rows, "", headerStyle.Render("  "+opt), "")
 		} else {
-			line = styleMenuItem.Render(" " + num + " " + opt)
+			num := fmt.Sprintf("[%d]", i)
+			var line string
+			if i == a.interactiveSelected {
+				line = styleMenuItemSelected.Render(" " + num + " " + opt)
+			} else {
+				line = styleMenuItem.Render(" " + num + " " + opt)
+			}
+			rows = append(rows, line)
 		}
-		rows = append(rows, line)
 	}
 
 	panelW := clamp(64, 40, a.width-4)
