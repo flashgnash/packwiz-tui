@@ -417,6 +417,50 @@ func (a *App) viewOutput() string {
 // ── Interactive ───────────────────────────────────────────────────────────────
 
 func (a *App) viewInteractive() string {
+	// Check if this is a yes/no prompt
+	isYesNo := len(a.interactiveOptions) == 2
+	if isYesNo {
+		opt0 := strings.ToLower(a.interactiveOptions[0])
+		opt1 := strings.ToLower(a.interactiveOptions[1])
+		isYesNo = (opt0 == "yes" || opt0 == "y") && (opt1 == "no" || opt1 == "n")
+	}
+
+	if isYesNo {
+		// Horizontal layout for yes/no prompts
+		promptLines := strings.Split(a.interactivePrompt, "\n")
+		var rows []string
+
+		// Show the prompt text with proper formatting
+		for _, line := range promptLines {
+			trimmed := strings.TrimSpace(line)
+			if trimmed != "" {
+				rows = append(rows, styleSubtitle.Render(trimmed))
+			}
+		}
+
+		rows = append(rows, "", "")
+
+		// Show Yes/No options horizontally
+		var yesBtn, noBtn string
+		if a.interactiveSelected == 0 {
+			yesBtn = styleMenuItemSelected.Render("  Yes  ")
+			noBtn = styleMenuItem.Render("  No  ")
+		} else {
+			yesBtn = styleMenuItem.Render("  Yes  ")
+			noBtn = styleMenuItemSelected.Render("  No  ")
+		}
+
+		buttonRow := lipgloss.JoinHorizontal(lipgloss.Left, yesBtn, "   ", noBtn)
+		rows = append(rows, buttonRow)
+
+		panelW := clamp(64, 40, a.width-4)
+		panelContent := strings.Join(rows, "\n")
+		panel := stylePanelFocused.Width(panelW).Render(panelContent)
+
+		return lipgloss.Place(a.width, a.height-1, lipgloss.Center, lipgloss.Center, panel)
+	}
+
+	// Vertical layout for numbered options (original behavior)
 	var rows []string
 	rows = append(rows, "")
 	rows = append(rows, styleSubtitle.Render("  "+a.interactivePrompt))

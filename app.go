@@ -95,16 +95,17 @@ type App struct {
 	menuIdx int
 
 	// Mods management
-	mods         []ModFile
-	modsFiltered []ModFile
-	modsIdx      int
-	modsModified map[string]bool // track modified mods by path (from git)
-	modsAdded    map[string]bool // track added mods by path (from git)
-	modsDeleted  map[string]bool // track deleted mods by path (from git)
-	searchInput  textinput.Model
-	searchFocus  bool
-	addModModal  bool
-	addModInput  textinput.Model
+	mods            []ModFile
+	modsFiltered    []ModFile
+	modsIdx         int
+	modsModified    map[string]bool // track modified mods by path (from git)
+	modsAdded       map[string]bool // track added mods by path (from git)
+	modsDeleted     map[string]bool // track deleted mods by path (from git)
+	searchInput     textinput.Model
+	searchFocus     bool
+	addModModal     bool
+	addModInput     textinput.Model
+	returnToAddModal bool // flag to reopen add modal after command completes
 
 	// Output screen
 	outputLines []string
@@ -318,7 +319,20 @@ func (a *App) runPackwiz(args ...string) tea.Cmd {
 
 func (a *App) runPackwizWithInput(input string, cmd *interactiveCmd) tea.Cmd {
 	return func() tea.Msg {
-		out, err := RunPackwizWithInput(cmd.packDir, input, cmd.args...)
+		out, prompt, err := RunPackwizWithInput(cmd.packDir, input, cmd.args...)
+		if prompt != nil {
+			// Additional interactive prompt detected (e.g., dependency install)
+			// Store the accumulated input so we can continue building on it
+			return msgInteractivePrompt{
+				prompt:  prompt.Prompt,
+				options: prompt.Options,
+				cmd: &interactiveCmd{
+					packDir: cmd.packDir,
+					args:    cmd.args,
+					input:   input, // preserve the full input sent so far
+				},
+			}
+		}
 		return msgCmdDone{output: out, err: err}
 	}
 }
@@ -458,6 +472,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.modsDeleted = m.deleted
 		a.filterMods()
 		a.screen = ScreenManageMods
+		// Reopen add modal if we came from adding a mod
+		if a.returnToAddModal {
+			a.returnToAddModal = false
+			a.addModModal = true
+			a.addModInput.Focus()
+			return a, textinput.Blink
+		}
 		return a, nil
 
 	case msgCmdDone:
@@ -708,6 +729,7 @@ func (a *App) updateManageMods(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				a.addModModal = false
 				a.addModInput.SetValue("")
+				a.returnToAddModal = true
 				a.startOutput()
 				return a, a.runPackwiz("mr", "add", name)
 			}
@@ -730,6 +752,8 @@ func (a *App) updateManageMods(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// else let textinput handle backspace
 			} else {
 				a.screen = ScreenMainMenu
+				a.searchInput.SetValue("")
+				a.filterMods()
 				return a, nil
 			}
 		case "/":
@@ -739,9 +763,11 @@ func (a *App) updateManageMods(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return a, textinput.Blink
 			}
 		case "n":
-			a.addModModal = true
-			a.addModInput.Focus()
-			return a, textinput.Blink
+			if !a.searchFocus {
+				a.addModModal = true
+				a.addModInput.Focus()
+				return a, textinput.Blink
+			}
 		case "up", "k":
 			if !a.searchFocus && a.modsIdx > 0 {
 				a.modsIdx--
@@ -839,6 +865,7 @@ func (a *App) updateOutput(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if a.outputDone {
 				if a.outputErr {
 					a.screen = ScreenMainMenu
+					a.returnToAddModal = false
 				} else {
 					a.loadingMsg = "Refreshing mod list…"
 					a.screen = ScreenLoading
@@ -860,24 +887,67 @@ func (a *App) updateInteractive(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return a, nil
 	}
+
+	// Check if this is a yes/no prompt
+	isYesNo := len(a.interactiveOptions) == 2
+	if isYesNo {
+		opt0 := strings.ToLower(a.interactiveOptions[0])
+		opt1 := strings.ToLower(a.interactiveOptions[1])
+		isYesNo = (opt0 == "yes" || opt0 == "y") && (opt1 == "no" || opt1 == "n")
+	}
+
 	switch m.String() {
 	case "ctrl+c":
 		return a, tea.Quit
 	case "esc":
 		// Cancel and go back
 		a.screen = ScreenManageMods
+		a.returnToAddModal = false
 		return a, nil
 	case "up", "k":
-		if a.interactiveSelected > 0 {
+		if !isYesNo && a.interactiveSelected > 0 {
 			a.interactiveSelected--
 		}
 	case "down", "j":
-		if a.interactiveSelected < len(a.interactiveOptions)-1 {
+		if !isYesNo && a.interactiveSelected < len(a.interactiveOptions)-1 {
+			a.interactiveSelected++
+		}
+	case "left", "h":
+		if isYesNo && a.interactiveSelected > 0 {
+			a.interactiveSelected--
+		}
+	case "right", "l":
+		if isYesNo && a.interactiveSelected < len(a.interactiveOptions)-1 {
 			a.interactiveSelected++
 		}
 	case "enter", " ":
-		// User selected an option (0-indexed, packwiz uses 0 for cancel)
-		selection := fmt.Sprintf("%d", a.interactiveSelected)
+		// User selected an option
+		var selection string
+
+		// Check if this is a yes/no prompt (detect by option text)
+		if len(a.interactiveOptions) == 2 {
+			opt0 := strings.ToLower(a.interactiveOptions[0])
+			opt1 := strings.ToLower(a.interactiveOptions[1])
+			if (opt0 == "yes" || opt0 == "y") && (opt1 == "no" || opt1 == "n") {
+				// This is a yes/no prompt - try both short and full form
+				if a.interactiveSelected == 0 {
+					selection = "y"
+				} else {
+					selection = "n"
+				}
+			}
+		}
+
+		// If not a y/n prompt, use numeric selection (0-indexed, 0 means cancel in packwiz)
+		if selection == "" {
+			selection = fmt.Sprintf("%d", a.interactiveSelected)
+		}
+
+		// Combine with previous input if this is a chained prompt
+		if a.interactivePending.input != "" {
+			selection = a.interactivePending.input + "\n" + selection
+		}
+
 		a.startOutput()
 		return a, a.runPackwizWithInput(selection, a.interactivePending)
 	}
@@ -961,7 +1031,18 @@ func (a *App) viewStatusBar() string {
 			hints = []string{"running…"}
 		}
 	case ScreenInteractive:
-		hints = []string{"↑↓ navigate", "enter select", "esc cancel"}
+		// Check if this is a yes/no prompt for appropriate hints
+		isYesNo := len(a.interactiveOptions) == 2
+		if isYesNo {
+			opt0 := strings.ToLower(a.interactiveOptions[0])
+			opt1 := strings.ToLower(a.interactiveOptions[1])
+			isYesNo = (opt0 == "yes" || opt0 == "y") && (opt1 == "no" || opt1 == "n")
+		}
+		if isYesNo {
+			hints = []string{"←→ navigate", "enter select", "esc cancel"}
+		} else {
+			hints = []string{"↑↓ navigate", "enter select", "esc cancel"}
+		}
 	}
 
 	// Render each hint as "key desc" with a separator between them.

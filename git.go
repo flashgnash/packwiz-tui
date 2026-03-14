@@ -3,11 +3,14 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/creack/pty"
 )
 
 const recentReposFile = ".packwiz-tui-recents.json"
@@ -186,7 +189,7 @@ func RunPackwizInteractive(packDir string, args ...string) (string, *Interactive
 	}()
 
 	// Give command time to complete
-	timer := time.NewTimer(5 * time.Second)
+	timer := time.NewTimer(10 * time.Second)
 	defer timer.Stop()
 
 	select {
@@ -214,13 +217,91 @@ func RunPackwizInteractive(packDir string, args ...string) (string, *Interactive
 	}
 }
 
-// RunPackwizWithInput runs packwiz with the given input string.
-func RunPackwizWithInput(packDir, input string, args ...string) (string, error) {
+// RunPackwizWithInput runs packwiz with the given input string using a pseudo-terminal.
+// This allows interaction with programs that read from /dev/tty instead of stdin.
+// Returns (output, prompt, error). If prompt is non-nil, additional input is needed.
+func RunPackwizWithInput(packDir, input string, args ...string) (string, *InteractivePrompt, error) {
 	cmd := exec.Command("packwiz", args...)
 	cmd.Dir = packDir
-	cmd.Stdin = strings.NewReader(input + "\n")
-	out, err := cmd.CombinedOutput()
-	return strings.TrimSpace(string(out)), err
+
+	// Start the command with a pty
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		return "", nil, err
+	}
+	defer ptmx.Close()
+
+	// Send the input to the pty
+	inputLines := strings.Split(input, "\n")
+	for _, line := range inputLines {
+		if line != "" {
+			time.Sleep(100 * time.Millisecond) // Small delay between inputs
+			_, err := ptmx.Write([]byte(line + "\n"))
+			if err != nil {
+				return "", nil, err
+			}
+		}
+	}
+
+	// Read all output
+	outputBuf := &strings.Builder{}
+	done := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(outputBuf, ptmx)
+		done <- err
+	}()
+
+	// Wait for command with timeout
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+
+	select {
+	case <-done:
+		// Command finished
+		cmd.Wait()
+		return strings.TrimSpace(outputBuf.String()), nil, nil
+
+	case <-timer.C:
+		// Timeout - might be waiting for more input
+		cmd.Process.Kill()
+		outputStr := outputBuf.String()
+		lowerOutput := strings.ToLower(outputStr)
+
+		// Check for yes/no prompts
+		if strings.Contains(lowerOutput, "[y/n]") ||
+		   strings.Contains(lowerOutput, "(y/n)") ||
+		   strings.Contains(lowerOutput, "y/n:") ||
+		   strings.Contains(lowerOutput, "y/n?") {
+
+			// Extract context including dependencies
+			lines := strings.Split(strings.TrimSpace(outputStr), "\n")
+			var promptLines []string
+
+			// Find the y/n prompt and context before it
+			for i := len(lines) - 1; i >= 0; i-- {
+				line := lines[i]
+				promptLines = append([]string{line}, promptLines...)
+
+				// Stop after we've collected a reasonable amount of context
+				if strings.Contains(strings.ToLower(line), "dependencies found") || len(promptLines) > 10 {
+					break
+				}
+			}
+
+			return outputStr, &InteractivePrompt{
+				Prompt:  strings.Join(promptLines, "\n"),
+				Options: []string{"Yes", "No"},
+				Output:  outputStr,
+			}, nil
+		}
+
+		prompt := detectInteractivePrompt(outputStr)
+		if prompt != nil {
+			return outputStr, prompt, nil
+		}
+
+		return strings.TrimSpace(outputStr), nil, fmt.Errorf("command timed out")
+	}
 }
 
 // detectInteractivePrompt parses packwiz output to detect interactive prompts.
