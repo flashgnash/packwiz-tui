@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -231,76 +230,105 @@ func RunPackwizWithInput(packDir, input string, args ...string) (string, *Intera
 	}
 	defer ptmx.Close()
 
-	// Send the input to the pty
-	inputLines := strings.Split(input, "\n")
-	for _, line := range inputLines {
-		if line != "" {
-			time.Sleep(100 * time.Millisecond) // Small delay between inputs
-			_, err := ptmx.Write([]byte(line + "\n"))
-			if err != nil {
-				return "", nil, err
+	// Send the input to the pty immediately
+	go func() {
+		inputLines := strings.Split(input, "\n")
+		for _, line := range inputLines {
+			if line != "" {
+				ptmx.Write([]byte(line + "\n"))
+				time.Sleep(50 * time.Millisecond) // Small delay between lines only
 			}
 		}
-	}
-
-	// Read all output
-	outputBuf := &strings.Builder{}
-	done := make(chan error, 1)
-	go func() {
-		_, err := io.Copy(outputBuf, ptmx)
-		done <- err
 	}()
 
-	// Wait for command with timeout
-	timer := time.NewTimer(10 * time.Second)
-	defer timer.Stop()
+	// Check if we've already sent a y/n response (to avoid re-detecting the prompt)
+	lowerInput := strings.ToLower(input)
+	alreadyAnswered := strings.Contains(lowerInput, "\ny") ||
+	                   strings.Contains(lowerInput, "\nn") ||
+	                   strings.HasSuffix(lowerInput, "y") ||
+	                   strings.HasSuffix(lowerInput, "n")
 
-	select {
-	case <-done:
-		// Command finished
-		cmd.Wait()
-		return strings.TrimSpace(outputBuf.String()), nil, nil
+	// Read output in background
+	var outputLines []string
+	outputChan := make(chan string, 100)
+	go func() {
+		reader := make([]byte, 1024)
+		for {
+			n, err := ptmx.Read(reader)
+			if err != nil {
+				close(outputChan)
+				return
+			}
+			if n > 0 {
+				outputChan <- string(reader[:n])
+			}
+		}
+	}()
 
-	case <-timer.C:
-		// Timeout - might be waiting for more input
-		cmd.Process.Kill()
-		outputStr := outputBuf.String()
-		lowerOutput := strings.ToLower(outputStr)
+	// Wait for command completion in background
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
 
-		// Check for yes/no prompts
-		if strings.Contains(lowerOutput, "[y/n]") ||
-		   strings.Contains(lowerOutput, "(y/n)") ||
-		   strings.Contains(lowerOutput, "y/n:") ||
-		   strings.Contains(lowerOutput, "y/n?") {
-
-			// Extract context including dependencies
-			lines := strings.Split(strings.TrimSpace(outputStr), "\n")
-			var promptLines []string
-
-			// Find the y/n prompt and context before it
-			for i := len(lines) - 1; i >= 0; i-- {
-				line := lines[i]
-				promptLines = append([]string{line}, promptLines...)
-
-				// Stop after we've collected a reasonable amount of context
-				if strings.Contains(strings.ToLower(line), "dependencies found") || len(promptLines) > 10 {
-					break
-				}
+	// Process output as it arrives
+	for {
+		select {
+		case chunk, ok := <-outputChan:
+			if !ok {
+				// Output channel closed, command finished
+				outputStr := strings.Join(outputLines, "")
+				return strings.TrimSpace(outputStr), nil, nil
 			}
 
-			return outputStr, &InteractivePrompt{
-				Prompt:  strings.Join(promptLines, "\n"),
-				Options: []string{"Yes", "No"},
-				Output:  outputStr,
-			}, nil
-		}
+			outputLines = append(outputLines, chunk)
+			currentOutput := strings.Join(outputLines, "")
+			lowerOutput := strings.ToLower(currentOutput)
 
-		prompt := detectInteractivePrompt(outputStr)
-		if prompt != nil {
-			return outputStr, prompt, nil
-		}
+			// Check for y/n prompt immediately (but only if we haven't already answered)
+			if !alreadyAnswered && (strings.Contains(lowerOutput, "[y/n]") ||
+			   strings.Contains(lowerOutput, "(y/n)")) {
 
-		return strings.TrimSpace(outputStr), nil, fmt.Errorf("command timed out")
+				// Kill the process since we found the prompt
+				cmd.Process.Kill()
+
+				// Extract the prompt with context
+				lines := strings.Split(strings.TrimSpace(currentOutput), "\n")
+				var promptLines []string
+
+				foundPrompt := false
+				for i := len(lines) - 1; i >= 0 && len(promptLines) < 15; i-- {
+					line := strings.TrimSpace(lines[i])
+					if line == "" {
+						continue
+					}
+
+					lowerLine := strings.ToLower(line)
+					if strings.Contains(lowerLine, "y/n") && !foundPrompt {
+						promptLines = append([]string{line}, promptLines...)
+						foundPrompt = true
+					} else if foundPrompt {
+						// Add context lines before the prompt
+						promptLines = append([]string{line}, promptLines...)
+						if strings.Contains(lowerLine, "dependencies found") {
+							break
+						}
+					}
+				}
+
+				return currentOutput, &InteractivePrompt{
+					Prompt:  strings.Join(promptLines, "\n"),
+					Options: []string{"Yes", "No"},
+					Output:  currentOutput,
+				}, nil
+			}
+
+		case <-done:
+			// Command finished
+			time.Sleep(50 * time.Millisecond) // Give output channel time to drain
+			outputStr := strings.Join(outputLines, "")
+			return strings.TrimSpace(outputStr), nil, nil
+		}
 	}
 }
 
