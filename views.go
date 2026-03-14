@@ -429,6 +429,7 @@ func (a *App) viewInteractive() string {
 		// Horizontal layout for yes/no prompts
 		promptLines := strings.Split(a.interactivePrompt, "\n")
 		panelW := clamp(64, 40, a.width-4)
+		panelH := clamp(20, 10, a.height-4)
 
 		var rows []string
 
@@ -457,8 +458,10 @@ func (a *App) viewInteractive() string {
 		centeredButtons := lipgloss.Place(panelW-4, 1, lipgloss.Center, lipgloss.Top, buttonRow)
 		rows = append(rows, centeredButtons)
 
+		// Center all content vertically within the panel
 		panelContent := strings.Join(rows, "\n")
-		panel := stylePanelFocused.Width(panelW).Render(panelContent)
+		centeredContent := lipgloss.Place(panelW-4, panelH-2, lipgloss.Center, lipgloss.Center, panelContent)
+		panel := stylePanelFocused.Width(panelW).Height(panelH).Render(centeredContent)
 
 		return lipgloss.Place(a.width, a.height-1, lipgloss.Center, lipgloss.Center, panel)
 	}
