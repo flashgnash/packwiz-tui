@@ -40,6 +40,10 @@
                   pkgs.git
                   pkgs.packwiz
                   pkgs.lazygit
+                  # test harness: server boot + headless client soak
+                  pkgs.temurin-bin-21
+                  pkgs.portablemc
+                  pkgs.gamescope # also provides gamescopectl for screenshots
                 ]
               }
           '';
@@ -74,6 +78,9 @@
             git
             packwiz
             lazygit
+            temurin-bin-21
+            portablemc
+            gamescope
           ];
           shellHook = ''
             echo ""

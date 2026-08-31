@@ -1,4 +1,4 @@
-module packwiz-tui
+module github.com/flashgnash/packwiz-tui
 
 go 1.21
 

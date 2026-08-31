@@ -40,6 +40,16 @@ func DetectGitRepo() (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// DetectGitRepoFrom returns the root of the git repo containing dir.
+func DetectGitRepoFrom(dir string) (string, error) {
+	cmd := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 // GetGitRemote returns the origin remote URL for the repo at repoPath.
 func GetGitRemote(repoPath string) string {
 	cmd := exec.Command("git", "-C", repoPath, "remote", "get-url", "origin")

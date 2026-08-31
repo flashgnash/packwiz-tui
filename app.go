@@ -61,6 +61,7 @@ type msgEditorDone struct {
 	modTime  time.Time
 }
 type msgLazygitDone struct{ err error }
+type msgSelfCmdDone struct{ err error }
 
 // interactiveCmd holds state for a command waiting on user input.
 type interactiveCmd struct {
@@ -595,6 +596,29 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.statusIsErr = false
 		a.statusExpire = time.Now().Add(2 * time.Second)
 		return a, tea.Batch(restoreMouse, a.expireStatus(), a.loadMods())
+
+	case msgAgentDone, msgSelfCmdDone:
+		// Same mouse-restore workaround as lazygit/editor.
+		restoreMouse := func() tea.Msg {
+			fmt.Print("\033[?1000h")
+			fmt.Print("\033[?1003h")
+			fmt.Print("\033[?1006h")
+			return tea.WindowSizeMsg{Width: a.width, Height: a.height}
+		}
+		var err error
+		switch mm := m.(type) {
+		case msgAgentDone:
+			err = mm.err
+		case msgSelfCmdDone:
+			err = mm.err
+		}
+		if err != nil {
+			a.statusMsg = "Error: " + err.Error()
+			a.statusIsErr = true
+			a.statusExpire = time.Now().Add(4 * time.Second)
+			return a, tea.Batch(restoreMouse, a.expireStatus())
+		}
+		return a, restoreMouse
 	}
 
 	// Delegate to the active screen.
@@ -675,6 +699,10 @@ func (a *App) updateCloneRepo(msg tea.Msg) (tea.Model, tea.Cmd) {
 var mainMenuItems = []struct{ icon, label string }{
 	{"◈", "Manage Mods"},
 	{"⚙", "Manage Loader"},
+	{"▶", "Test Server"},
+	{"◉", "Full-stack Test"},
+	{"⇄", "Fix Mod Sources"},
+	{"✦", "Agent Chat"},
 	{"↑", "Push & Exit"},
 	{"✕", "Exit without Pushing"},
 }
@@ -684,29 +712,28 @@ func (a *App) updateMainMenu(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return a, nil
 	}
-	switch m.String() {
+	key := m.String()
+	switch key {
 	case "ctrl+c", "q":
 		return a, tea.Quit
 	case "up", "k":
 		a.menuIdx = (a.menuIdx - 1 + len(mainMenuItems)) % len(mainMenuItems)
 	case "down", "j":
 		a.menuIdx = (a.menuIdx + 1) % len(mainMenuItems)
-	case "1":
-		a.menuIdx = 0
-		return a.activateMenuItem()
-	case "2":
-		a.menuIdx = 1
-		return a.activateMenuItem()
-	case "3":
-		a.menuIdx = 2
-		return a.activateMenuItem()
-	case "4":
-		a.menuIdx = 3
-		return a.activateMenuItem()
 	case "g":
 		return a, a.openLazygit()
+	case "c":
+		return a, a.openAgent()
 	case "enter", " ":
 		return a.activateMenuItem()
+	default:
+		if len(key) == 1 && key[0] >= '1' && key[0] <= '9' {
+			idx := int(key[0] - '1')
+			if idx < len(mainMenuItems) {
+				a.menuIdx = idx
+				return a.activateMenuItem()
+			}
+		}
 	}
 	return a, nil
 }
@@ -720,12 +747,45 @@ func (a *App) activateMenuItem() (tea.Model, tea.Cmd) {
 	case 1:
 		a.screen = ScreenManageLoader
 	case 2:
+		return a, a.runSelfCommand("test", "server")
+	case 3:
+		return a, a.runSelfCommand("test", "full")
+	case 4:
+		return a, a.runSelfCommand("fix-sources")
+	case 5:
+		return a, a.openAgent()
+	case 6:
 		a.startOutput()
 		return a, a.gitPush()
-	case 3:
+	case 7:
 		return a, tea.Quit
 	}
 	return a, nil
+}
+
+// runSelfCommand suspends the TUI and runs this binary's own CLI subcommand
+// in the real terminal, so long-running tests stream output live.
+func (a *App) runSelfCommand(args ...string) tea.Cmd {
+	self, err := os.Executable()
+	if err != nil {
+		self = os.Args[0]
+	}
+	// Hold the terminal after completion so the user can read the output.
+	shellLine := shellQuote(append([]string{self}, args...)) +
+		`; ec=$?; echo; echo "── done (exit $ec) — press enter ──"; read -r _`
+	c := exec.Command("sh", "-c", shellLine)
+	c.Dir = a.packDir
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		return msgSelfCmdDone{err: err}
+	})
+}
+
+func shellQuote(parts []string) string {
+	quoted := make([]string, len(parts))
+	for i, p := range parts {
+		quoted[i] = "'" + strings.ReplaceAll(p, "'", `'\''`) + "'"
+	}
+	return strings.Join(quoted, " ")
 }
 
 func (a *App) updateManageLoader(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -1096,7 +1156,7 @@ func (a *App) viewStatusBar() string {
 	case ScreenCloneRepo:
 		hints = []string{"enter clone", "esc back", "ctrl+c quit"}
 	case ScreenMainMenu:
-		hints = []string{"↑↓ navigate", "enter select", "1-4 shortcut", "g lazygit", "q quit"}
+		hints = []string{"↑↓ navigate", "enter select", "1-8 shortcut", "g lazygit", "c agent", "q quit"}
 	case ScreenManageMods:
 		hints = []string{"enter edit", "g lazygit", "r refresh", "/ search", "n add", "d delete/restore", "esc back"}
 	case ScreenOutput:

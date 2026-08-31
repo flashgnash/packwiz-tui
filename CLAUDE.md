@@ -62,12 +62,29 @@ Asynchronous operations return custom message types that trigger state updates:
 Commands are spawned via methods like `detectRepo()`, `loadMods()`, `runPackwiz()` in app.go:139-236.
 
 ### File Organization
-- **main.go**: Entry point, initializes Bubble Tea program
+- **main.go**: Entry point — dispatches CLI subcommands (cli.go) or starts the TUI
+- **cli.go**: Headless subcommands (`test server`, `test full`, `tag-sides`, `fix-sources`, `agent`) mirroring the TUI tooling
 - **app.go**: Core application state, screen logic, update handlers
 - **views.go**: All view rendering functions for each screen
 - **styles.go**: Lipgloss style definitions and color palette
 - **git.go**: Git operations, repository detection, pack.toml discovery
 - **helpers.go**: Utility functions (truncate, clamp, visibleWindow)
+- **packmeta.go**: Parses mc/loader versions from pack.toml (`PackMeta`)
+- **harness.go**: Server test harness — loader install, packwiz-installer, boot, log watch, RCON metrics. State under `<pack>/.packwiz-tui/` (auto-excluded from git + packwiz index)
+- **soak.go**: Full-stack test — headless client via gamescope+portablemc (offline account, quick-play join), spectator soak, `gamescopectl` screenshots into `.packwiz-tui/last-test/`
+- **rcon.go**: Minimal native Minecraft RCON client
+- **sides.go**: `TagSides` — side=client/both tagging by diffing a server-pack zip
+- **sources.go**: `FixModSources` — detects CurseForge-API-blocked mods (by running packwiz-installer into a scratch dir) and swaps them to byte-identical Modrinth files via sha1 lookup, preserving side
+- **agent.go**: Chat agent integration (`tea.ExecProcess`, like lazygit) + `~/.packwiz-tui-config.json` / `PACKWIZ_TUI_AGENT` config; keeps a marker-delimited tooling section in the pack's CLAUDE.md and puts this binary on the agent's PATH
+- **export.go**: Artifact builders into `.packwiz-tui/build/` — `ExportMMC` (Prism-importable instance zip, self-updating via packwiz-installer pre-launch hook pointed at the repo's raw pack.toml URL), `ExportPackwiz` (mrpack/curseforge), `ExportServer`, `ReleaseGithub` (gh CLI)
+- **workflow.go**: `InitWorkflow` — scaffolds a tag-triggered GitHub Actions release workflow (installs packwiz + this module via `go install`, so go.mod's module path must stay `github.com/flashgnash/packwiz-tui`)
+
+### Test Harness Notes
+- Everything is generic across packs/loaders (neoforge/forge/fabric/quilt) — versions come from pack.toml; no pack-specific logic
+- Long-running tests are TUI-launched via `runSelfCommand` (tea.ExecProcess of this binary's own CLI subcommand) so output streams in the real terminal
+- Test player is put in spectator via RCON right after join so it can't die during the soak
+- On NeoForge the TPS command is `neoforge tps` (not `forge tps`); `spark tps` is tried first when the pack ships spark
+- The nix wrapper provides java 21, portablemc, and gamescope; `test full` refuses to run if they're missing from PATH
 
 ### Data Flow
 1. User in git repo → `detectRepo()` → finds pack.toml → loads main menu
