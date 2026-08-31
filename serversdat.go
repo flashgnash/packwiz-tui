@@ -14,6 +14,27 @@ import (
 // exports carry it, but is packwizignored so it never ships in the index.
 const packConfigFile = "packwiz-tui.toml"
 
+// standardIgnores are repo/agent files that must never enter the pack index:
+// anything indexed but absent from the pushed repo 404s every player install
+// (as CLAUDE.md and .claude/scheduled_tasks.lock have each done once).
+var standardIgnores = []string{
+	".claude/**",
+	".packwiz-tui/**",
+	packConfigFile,
+	"CLAUDE.md",
+	"README.md",
+	".github/**",
+}
+
+// EnsurePackIgnores writes the standard ignore set into the pack's
+// .packwizignore. Called whenever a pack is opened (CLI or UI), so every
+// pack packwiz-tui ever touches is protected before any refresh can run.
+func EnsurePackIgnores(packDir string) {
+	for _, line := range standardIgnores {
+		ensureLineInFile(filepath.Join(packDir, ".packwizignore"), line)
+	}
+}
+
 // ReadServerAddress returns the configured default server address, or "".
 func ReadServerAddress(packDir string) string {
 	data, err := os.ReadFile(filepath.Join(packDir, packConfigFile))

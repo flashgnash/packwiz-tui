@@ -58,7 +58,9 @@ func RunCLI(args []string) (handled bool, exitCode int) {
 	findPack := func() string {
 		cwd, _ := os.Getwd()
 		if toml, err := FindPackToml(cwd); err == nil {
-			return filepath.Dir(toml)
+			dir := filepath.Dir(toml)
+			EnsurePackIgnores(dir)
+			return dir
 		}
 		fmt.Fprintln(os.Stderr, "error: no pack.toml found in or below the current directory")
 		os.Exit(1)

@@ -487,6 +487,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case msgPackFound:
+		EnsurePackIgnores(m.packDir)
 		a.packDir = m.packDir
 		a.packName = m.packName
 		a.repoRoot = m.repoRoot

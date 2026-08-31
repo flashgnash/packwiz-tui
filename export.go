@@ -139,7 +139,7 @@ ConfigVersion=1.2
 InstanceType=OneSix
 name=%s
 OverrideCommands=true
-PreLaunchCommand="\"$INST_JAVA\" -jar packwiz-installer-bootstrap.jar -g %s"
+PreLaunchCommand="\"$INST_JAVA\" -jar packwiz-installer-bootstrap.jar %s"
 `, meta.Name, packURL)
 
 	mmcPack := fmt.Sprintf(`{
