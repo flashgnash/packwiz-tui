@@ -84,6 +84,7 @@ This pack is managed with packwiz-tui, which is on PATH here. Useful commands
 - ` + "`packwiz-tui tag-sides <server-pack.zip>`" + ` — set side=client/both on all mods by diffing an official server pack.
 - ` + "`packwiz-tui export prism|prism-preinstalled|mrpack|curseforge|server|all`" + ` — build importable artifacts into ` + "`.packwiz-tui/build/`" + `. The prism zips import into PrismLauncher and self-update from this repo via a packwiz-installer pre-launch hook (preinstalled bundles all mods too).
 - ` + "`packwiz-tui install-prism`" + ` — write the self-updating instance straight into the local PrismLauncher (creates or refreshes; never touches worlds/options). User restarts Prism to see it.
+- ` + "`packwiz-tui server-ip [address]`" + ` — get/set the pack's default server address; when set, prism exports/installs get a prefilled servers.dat (existing installs keep their own server list).
 - ` + "`packwiz-tui nixos-config`" + ` — print a services.minecraft-servers block for the user's nix-minecraft flake, ready to paste into nixos-configuration (glados-style hosting).
 - ` + "`packwiz-tui release [tag]`" + ` — export all + publish a GitHub release with gh (defaults to v<pack version>).
 - ` + "`packwiz-tui init-workflow`" + ` — scaffold a GitHub Actions workflow: every push builds all artifacts (downloadable as workflow artifacts), and a v* tag push publishes them as a release.
@@ -140,6 +141,9 @@ var agentAllowRules = []string{
 // ensureAgentSettings merges agentAllowRules into the pack's project-level
 // .claude/settings.json, preserving anything else in the file.
 func ensureAgentSettings(packDir string) {
+	// Keep agent config out of the pack index — a repeat of the CLAUDE.md
+	// incident (docs hashed into the index break player installs).
+	ensureLineInFile(filepath.Join(packDir, ".packwizignore"), ".claude/**")
 	path := filepath.Join(packDir, ".claude", "settings.json")
 	var root map[string]any
 	if data, err := os.ReadFile(path); err == nil {

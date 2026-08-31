@@ -166,6 +166,9 @@ PreLaunchCommand="\"$INST_JAVA\" -jar packwiz-installer-bootstrap.jar %s"
 	if icon, err := os.ReadFile(filepath.Join(packDir, "icon.png")); err == nil {
 		files["icon.png"] = icon
 	}
+	if addr := ReadServerAddress(packDir); addr != "" {
+		files[".minecraft/servers.dat"] = serversDatBytes(meta.Name, addr)
+	}
 	return files, meta, packURL, nil
 }
 
@@ -243,6 +246,13 @@ func InstallPrism(packDir string, progress io.Writer) error {
 	}
 	for name, data := range files {
 		dest := filepath.Join(instDir, filepath.FromSlash(name))
+		// The server list belongs to the player once the instance exists —
+		// only seed it on first install, never clobber it on refresh.
+		if name == ".minecraft/servers.dat" {
+			if _, err := os.Stat(dest); err == nil {
+				continue
+			}
+		}
 		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
 			return err
 		}

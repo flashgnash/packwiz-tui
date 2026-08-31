@@ -156,6 +156,21 @@ func RunCLI(args []string) (handled bool, exitCode int) {
 		}
 		return true, 0
 
+	case "server-ip", "server-address":
+		packDir := findPack()
+		if len(args) > 1 {
+			if err := WriteServerAddress(packDir, args[1]); err != nil {
+				fmt.Fprintf(os.Stderr, "FAILED: %v\n", err)
+				return true, 1
+			}
+			fmt.Printf("server address %q will be prefilled into prism exports/installs\n", args[1])
+		} else if addr := ReadServerAddress(packDir); addr != "" {
+			fmt.Println(addr)
+		} else {
+			fmt.Println("(no server address configured)")
+		}
+		return true, 0
+
 	case "nixos-config":
 		snippet, err := GenerateNixosConfig(findPack())
 		if err != nil {

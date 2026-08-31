@@ -82,6 +82,28 @@ func (a *App) viewCloneRepo() string {
 	return lipgloss.Place(a.width, a.height-1, lipgloss.Center, lipgloss.Center, panel)
 }
 
+// ── Server address ────────────────────────────────────────────────────────────
+
+func (a *App) viewServerIP() string {
+	errLine := ""
+	if a.serverIPError != "" {
+		errLine = "\n" + styleOutputError.Render("  ✗ "+a.serverIPError)
+	}
+	panelW := clamp(64, 40, a.width-4)
+	panel := stylePanelFocused.Width(panelW).Render(
+		lipgloss.JoinVertical(lipgloss.Left,
+			styleTitle.Render("  Server Address"),
+			styleSubtitle.Render("  Prefilled into the multiplayer list of prism installs"),
+			"",
+			styleSearchLabel.Render("  Address: ")+a.serverIPInput.View(),
+			errLine,
+			"",
+			styleSubtitle.Render("  enter to save  ·  empty to clear  ·  esc to cancel"),
+		),
+	)
+	return lipgloss.Place(a.width, a.height-1, lipgloss.Center, lipgloss.Center, panel)
+}
+
 // ── Main menu ─────────────────────────────────────────────────────────────────
 
 func (a *App) viewMainMenu() string {

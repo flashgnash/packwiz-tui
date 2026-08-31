@@ -26,6 +26,7 @@ const (
 	ScreenManageLoader
 	ScreenOutput
 	ScreenInteractive
+	ScreenServerIP
 )
 
 // ── Messages ─────────────────────────────────────────────────────────────────
@@ -86,6 +87,10 @@ type App struct {
 
 	// Clone
 	cloneInput textinput.Model
+
+	// Server address prefill
+	serverIPInput textinput.Model
+	serverIPError string
 	cloneError string
 
 	// Pack state
@@ -154,12 +159,18 @@ func NewApp() *App {
 	addMod.CharLimit = 128
 	addMod.Width = 40
 
+	serverIP := textinput.New()
+	serverIP.Placeholder = "play.example.com or 1.2.3.4:25565"
+	serverIP.CharLimit = 256
+	serverIP.Width = 50
+
 	return &App{
 		screen:       ScreenLoading,
 		loadingMsg:   "Detecting git repository…",
-		cloneInput:   clone,
-		searchInput:  search,
-		addModInput:  addMod,
+		cloneInput:    clone,
+		searchInput:   search,
+		addModInput:   addMod,
+		serverIPInput: serverIP,
 		modsDeleted:  make(map[string]bool),
 		modsModified: make(map[string]bool),
 	}
@@ -629,6 +640,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a.updateCloneRepo(msg)
 	case ScreenMainMenu:
 		return a.updateMainMenu(msg)
+	case ScreenServerIP:
+		return a.updateServerIP(msg)
 	case ScreenManageMods:
 		return a.updateManageMods(msg)
 	case ScreenManageLoader:
@@ -704,6 +717,7 @@ var mainMenuItems = []struct{ icon, label string }{
 	{"⇄", "Fix Mod Sources"},
 	{"✦", "Agent Chat"},
 	{"⇩", "Install to Prism"},
+	{"◎", "Server Address"},
 	{"↑", "Push & Exit"},
 	{"✕", "Exit without Pushing"},
 }
@@ -758,9 +772,13 @@ func (a *App) activateMenuItem() (tea.Model, tea.Cmd) {
 	case 6:
 		return a, a.runSelfCommand("install-prism")
 	case 7:
+		a.serverIPInput.SetValue(ReadServerAddress(a.packDir))
+		a.serverIPInput.Focus()
+		a.screen = ScreenServerIP
+	case 8:
 		a.startOutput()
 		return a, a.gitPush()
-	case 8:
+	case 9:
 		return a, tea.Quit
 	}
 	return a, nil
@@ -789,6 +807,33 @@ func shellQuote(parts []string) string {
 		quoted[i] = "'" + strings.ReplaceAll(p, "'", `'\''`) + "'"
 	}
 	return strings.Join(quoted, " ")
+}
+
+func (a *App) updateServerIP(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m, ok := msg.(tea.KeyMsg); ok {
+		switch m.String() {
+		case "ctrl+c":
+			return a, tea.Quit
+		case "esc":
+			a.serverIPError = ""
+			a.serverIPInput.Blur()
+			a.screen = ScreenMainMenu
+			return a, nil
+		case "enter":
+			addr := strings.TrimSpace(a.serverIPInput.Value())
+			if err := WriteServerAddress(a.packDir, addr); err != nil {
+				a.serverIPError = err.Error()
+				return a, nil
+			}
+			a.serverIPError = ""
+			a.serverIPInput.Blur()
+			a.screen = ScreenMainMenu
+			return a, nil
+		}
+	}
+	var cmd tea.Cmd
+	a.serverIPInput, cmd = a.serverIPInput.Update(msg)
+	return a, cmd
 }
 
 func (a *App) updateManageLoader(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -1143,6 +1188,8 @@ func (a *App) View() string {
 		body = a.viewOutput()
 	case ScreenInteractive:
 		body = a.viewInteractive()
+	case ScreenServerIP:
+		body = a.viewServerIP()
 	default:
 		body = "unknown screen"
 	}
@@ -1158,8 +1205,10 @@ func (a *App) viewStatusBar() string {
 		hints = []string{"↑↓ navigate", "enter select", "q quit"}
 	case ScreenCloneRepo:
 		hints = []string{"enter clone", "esc back", "ctrl+c quit"}
+	case ScreenServerIP:
+		hints = []string{"enter save", "esc cancel", "ctrl+c quit"}
 	case ScreenMainMenu:
-		hints = []string{"↑↓ navigate", "enter select", "1-8 shortcut", "g lazygit", "c agent", "q quit"}
+		hints = []string{"↑↓ navigate", "enter select", "1-9 shortcut", "g lazygit", "c agent", "q quit"}
 	case ScreenManageMods:
 		hints = []string{"enter edit", "g lazygit", "r refresh", "/ search", "n add", "d delete/restore", "esc back"}
 	case ScreenOutput:
