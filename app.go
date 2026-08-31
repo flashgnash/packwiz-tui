@@ -703,6 +703,7 @@ var mainMenuItems = []struct{ icon, label string }{
 	{"◉", "Full-stack Test"},
 	{"⇄", "Fix Mod Sources"},
 	{"✦", "Agent Chat"},
+	{"⇩", "Install to Prism"},
 	{"↑", "Push & Exit"},
 	{"✕", "Exit without Pushing"},
 }
@@ -755,9 +756,11 @@ func (a *App) activateMenuItem() (tea.Model, tea.Cmd) {
 	case 5:
 		return a, a.openAgent()
 	case 6:
+		return a, a.runSelfCommand("install-prism")
+	case 7:
 		a.startOutput()
 		return a, a.gitPush()
-	case 7:
+	case 8:
 		return a, tea.Quit
 	}
 	return a, nil
