@@ -54,17 +54,32 @@ jobs:
             .packwiz-tui/build/*.zip
             .packwiz-tui/build/*.mrpack
 
-      - name: Update rolling mmc installer release
+      - name: Update rolling latest release
         if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Workflow artifacts expire; the mmc instance zip is tiny and
-          # self-updating, so keep one permanent copy on a rolling release.
-          gh release create latest --prerelease --title "Prism installer (rolling)" \
-            --notes "Import this zip into PrismLauncher — the instance auto-updates from this repo on every launch." \
-            2>/dev/null || true
-          gh release upload latest .packwiz-tui/build/*-mmc.zip --clobber
+          # Keep the newest build of every artifact on a rolling release.
+          # Numbered prefixes order the asset list: Prism installer first.
+          mkdir -p .packwiz-tui/ordered
+          cd .packwiz-tui/build
+          for f in *-prism-installer.zip; do cp "$f" "../ordered/01-$f"; done
+          for f in *-curseforge.zip;      do cp "$f" "../ordered/02-$f"; done
+          for f in *.mrpack;              do cp "$f" "../ordered/03-$f"; done
+          for f in *-server.zip;          do cp "$f" "../ordered/04-$f"; done
+          cd ../..
+          {
+            echo "Rolling build of the default branch. Assets in order:"
+            echo
+            echo "1. **Prism installer** — import into PrismLauncher; the instance auto-updates from this repo on every launch (recommended)"
+            echo "2. **CurseForge pack** — import into the CurseForge app"
+            echo "3. **Modrinth pack** (.mrpack) — import into Prism or the Modrinth app"
+            echo "4. **Server files** — ready-to-run server"
+          } > .packwiz-tui/release-notes.md
+          gh release delete latest --yes 2>/dev/null || true
+          gh release create latest --prerelease --title "Latest build (rolling)" \
+            --notes-file .packwiz-tui/release-notes.md \
+            .packwiz-tui/ordered/*
 
       - name: Create release
         if: startsWith(github.ref, 'refs/tags/')

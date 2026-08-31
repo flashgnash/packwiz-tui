@@ -149,11 +149,11 @@ func ExportMMC(packDir string, progress io.Writer) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	dest := filepath.Join(out, packSlug(meta.Name)+"-mmc.zip")
+	dest := filepath.Join(out, packSlug(meta.Name)+"-prism-installer.zip")
 	if err := writeZip(dest, files); err != nil {
 		return "", err
 	}
-	fmt.Fprintf(progress, "mmc instance: %s (updates from %s)\n", dest, packURL)
+	fmt.Fprintf(progress, "prism installer: %s (updates from %s)\n", dest, packURL)
 	return dest, nil
 }
 
