@@ -30,9 +30,35 @@ func packSlug(name string) string {
 	return strings.Trim(slug, "-")
 }
 
+// artifactBase names artifacts after the git repo when there is one (e.g.
+// "modified-atm10"), falling back to the pack name.
+func artifactBase(packDir string, meta PackMeta) string {
+	if root, err := DetectGitRepoFrom(packDir); err == nil {
+		if remote := GetGitRemote(root); remote != "" {
+			repo := strings.TrimSuffix(remote, ".git")
+			repo = repo[strings.LastIndexAny(repo, "/:")+1:]
+			if repo != "" {
+				return packSlug(repo)
+			}
+		}
+	}
+	return packSlug(meta.Name)
+}
+
 // DetectPackURL derives the raw URL of pack.toml from the git remote and
 // current branch. Works for github.com remotes (joelbotc-style deployment).
 func DetectPackURL(packDir string) (string, error) {
+	return detectPackURL(packDir, false)
+}
+
+// DetectPackURLDefaultBranch is DetectPackURL pinned to the remote's default
+// branch — for long-lived references like server configs, which shouldn't
+// track whatever feature branch the working copy happens to be on.
+func DetectPackURLDefaultBranch(packDir string) (string, error) {
+	return detectPackURL(packDir, true)
+}
+
+func detectPackURL(packDir string, useDefaultBranch bool) (string, error) {
 	root, err := DetectGitRepoFrom(packDir)
 	if err != nil {
 		return "", fmt.Errorf("pack is not in a git repo: %w", err)
@@ -45,13 +71,17 @@ func DetectPackURL(packDir string) (string, error) {
 	if m == nil {
 		return "", fmt.Errorf("remote %q is not a github.com URL", remote)
 	}
-	branchOut, err := exec.Command("git", "-C", root, "rev-parse", "--abbrev-ref", "HEAD").Output()
-	if err != nil {
-		return "", err
+	branch := "HEAD"
+	if !useDefaultBranch {
+		branchOut, err := exec.Command("git", "-C", root, "rev-parse", "--abbrev-ref", "HEAD").Output()
+		if err != nil {
+			return "", err
+		}
+		branch = strings.TrimSpace(string(branchOut))
 	}
-	branch := strings.TrimSpace(string(branchOut))
 	if branch == "HEAD" {
-		// Detached HEAD (e.g. CI tag checkout) — use the remote default branch.
+		// Detached HEAD (e.g. CI tag checkout) or default requested — use the
+		// remote default branch.
 		if out, err := exec.Command("git", "-C", root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").Output(); err == nil {
 			branch = strings.TrimPrefix(strings.TrimSpace(string(out)), "origin/")
 		} else {
@@ -149,11 +179,41 @@ func ExportMMC(packDir string, progress io.Writer) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	dest := filepath.Join(out, packSlug(meta.Name)+"-prism-installer.zip")
+	dest := filepath.Join(out, artifactBase(packDir, meta)+"-prism.zip")
 	if err := writeZip(dest, files); err != nil {
 		return "", err
 	}
-	fmt.Fprintf(progress, "prism installer: %s (updates from %s)\n", dest, packURL)
+	fmt.Fprintf(progress, "prism instance: %s (updates from %s)\n", dest, packURL)
+	return dest, nil
+}
+
+// ExportMMCPreinstalled writes a Prism-importable instance zip with the
+// entire client side already installed — no first-launch download wait. The
+// pre-launch hook is still present, so the instance keeps itself updated.
+func ExportMMCPreinstalled(packDir string, progress io.Writer) (string, error) {
+	files, meta, packURL, err := mmcInstanceFiles(packDir)
+	if err != nil {
+		return "", err
+	}
+	out, err := buildDir(packDir)
+	if err != nil {
+		return "", err
+	}
+	scratch, err := os.MkdirTemp("", "packwiz-tui-client-export-")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(scratch)
+
+	fmt.Fprintln(progress, "installing client files for preinstalled instance…")
+	if instOut, err := RunPackwizInstaller(scratch, packDir, "client"); err != nil {
+		return "", fmt.Errorf("packwiz-installer failed:\n%s", tail(instOut, 30))
+	}
+	dest := filepath.Join(out, artifactBase(packDir, meta)+"-prism-preinstalled.zip")
+	if err := writeZipWithDir(dest, files, scratch, ".minecraft"); err != nil {
+		return "", err
+	}
+	fmt.Fprintf(progress, "prism preinstalled instance: %s (updates from %s)\n", dest, packURL)
 	return dest, nil
 }
 
@@ -176,7 +236,7 @@ func InstallPrism(packDir string, progress io.Writer) error {
 	files["instance.cfg"] = append(files["instance.cfg"], []byte(fmt.Sprintf(
 		"OverrideMemory=true\nMinMemAlloc=1024\nMaxMemAlloc=%d\n", memGb*1024))...)
 
-	instDir := filepath.Join(instancesDir, packSlug(meta.Name))
+	instDir := filepath.Join(instancesDir, artifactBase(packDir, meta))
 	existing := false
 	if _, err := os.Stat(instDir); err == nil {
 		existing = true
@@ -194,7 +254,7 @@ func InstallPrism(packDir string, progress io.Writer) error {
 	if existing {
 		verb = "updated"
 	}
-	fmt.Fprintf(progress, "%s Prism instance %q in %s (updates from %s)\n", verb, packSlug(meta.Name), instancesDir, packURL)
+	fmt.Fprintf(progress, "%s Prism instance %q in %s (updates from %s)\n", verb, artifactBase(packDir, meta), instancesDir, packURL)
 	fmt.Fprintln(progress, "restart PrismLauncher (or refresh its instance list) to see it")
 	return nil
 }
@@ -243,7 +303,7 @@ func ExportPackwiz(packDir, platform string, progress io.Writer) (string, error)
 		ext = ".mrpack"
 		suffix = ""
 	}
-	dest := filepath.Join(out, packSlug(meta.Name)+suffix+ext)
+	dest := filepath.Join(out, artifactBase(packDir, meta)+suffix+ext)
 	cmdOut, err := RunPackwiz(packDir, platform, "export", "-o", dest)
 	if err != nil {
 		return "", fmt.Errorf("packwiz %s export failed:\n%s", platform, tail(cmdOut, 15))
@@ -273,7 +333,7 @@ func ExportServer(packDir string, progress io.Writer) (string, error) {
 	if instOut, err := RunPackwizInstaller(scratch, packDir, "server"); err != nil {
 		return "", fmt.Errorf("packwiz-installer failed:\n%s", tail(instOut, 30))
 	}
-	dest := filepath.Join(out, packSlug(meta.Name)+"-server.zip")
+	dest := filepath.Join(out, artifactBase(packDir, meta)+"-server.zip")
 	if err := zipDir(dest, scratch); err != nil {
 		return "", err
 	}
@@ -289,7 +349,8 @@ func ExportAll(packDir string, progress io.Writer) ([]string, error) {
 		run  func() (string, error)
 	}
 	steps := []step{
-		{"mmc", func() (string, error) { return ExportMMC(packDir, progress) }},
+		{"prism", func() (string, error) { return ExportMMC(packDir, progress) }},
+		{"prism-preinstalled", func() (string, error) { return ExportMMCPreinstalled(packDir, progress) }},
 		{"mrpack", func() (string, error) { return ExportPackwiz(packDir, "modrinth", progress) }},
 		{"curseforge", func() (string, error) { return ExportPackwiz(packDir, "curseforge", progress) }},
 		{"server", func() (string, error) { return ExportServer(packDir, progress) }},
@@ -356,6 +417,54 @@ func writeZip(dest string, files map[string][]byte) error {
 		if _, err := fw.Write(data); err != nil {
 			return err
 		}
+	}
+	return w.Close()
+}
+
+// writeZipWithDir writes the literal files plus everything under dirRoot,
+// prefixed with dirPrefix inside the archive. Literal files win on conflict.
+func writeZipWithDir(dest string, files map[string][]byte, dirRoot, dirPrefix string) error {
+	f, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	w := zip.NewWriter(f)
+	for name, data := range files {
+		fw, err := w.Create(name)
+		if err != nil {
+			return err
+		}
+		if _, err := fw.Write(data); err != nil {
+			return err
+		}
+	}
+	err = filepath.Walk(dirRoot, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		rel, err := filepath.Rel(dirRoot, path)
+		if err != nil {
+			return err
+		}
+		name := dirPrefix + "/" + filepath.ToSlash(rel)
+		if _, clash := files[name]; clash {
+			return nil
+		}
+		fw, err := w.Create(name)
+		if err != nil {
+			return err
+		}
+		src, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer src.Close()
+		_, err = io.Copy(fw, src)
+		return err
+	})
+	if err != nil {
+		return err
 	}
 	return w.Close()
 }

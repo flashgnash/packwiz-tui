@@ -29,9 +29,12 @@ commands:
   test full          server + real headless client (gamescope), soak, screenshots
   tag-sides <zip>    set side=client/both on all mods by diffing a server-pack zip
   fix-sources        swap CurseForge-API-blocked mods to Modrinth (byte-identical files)
-  export <what>      build artifacts into .packwiz-tui/build/ — mmc (Prism-importable,
-                     self-updating from this repo), mrpack, curseforge, server, or all
+  export <what>      build artifacts into .packwiz-tui/build/ — prism (importable,
+                     self-updating from this repo), prism-preinstalled (same but with
+                     all mods bundled), mrpack, curseforge, server, or all
   install-prism      write the self-updating instance into the local PrismLauncher
+  nixos-config       print a services.minecraft-servers block for the nix-minecraft
+                     flake module, ready to paste into nixos-configuration (glados-style)
   release [tag]      export all + publish a GitHub release via gh (default tag: v<pack version>)
   init-workflow      scaffold .github/workflows/release.yml (build artifacts on every
                      push; publish a GitHub release on v* tag push)
@@ -125,14 +128,16 @@ func RunCLI(args []string) (handled bool, exitCode int) {
 
 	case "export":
 		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "usage: packwiz-tui export mmc|mrpack|curseforge|server|all")
+			fmt.Fprintln(os.Stderr, "usage: packwiz-tui export prism|prism-preinstalled|mrpack|curseforge|server|all")
 			return true, 1
 		}
 		packDir := findPack()
 		var err error
 		switch args[1] {
-		case "mmc":
+		case "prism", "mmc":
 			_, err = ExportMMC(packDir, os.Stdout)
+		case "prism-preinstalled":
+			_, err = ExportMMCPreinstalled(packDir, os.Stdout)
 		case "mrpack":
 			_, err = ExportPackwiz(packDir, "modrinth", os.Stdout)
 		case "curseforge":
@@ -149,6 +154,15 @@ func RunCLI(args []string) (handled bool, exitCode int) {
 			fmt.Fprintf(os.Stderr, "FAILED: %v\n", err)
 			return true, 1
 		}
+		return true, 0
+
+	case "nixos-config":
+		snippet, err := GenerateNixosConfig(findPack())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "FAILED: %v\n", err)
+			return true, 1
+		}
+		fmt.Print(snippet)
 		return true, 0
 
 	case "install-prism":
