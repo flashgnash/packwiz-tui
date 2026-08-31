@@ -46,6 +46,7 @@ func agentCommand(packDir string) (*exec.Cmd, error) {
 		return nil, err
 	}
 	ensureAgentContext(packDir)
+	ensureAgentSettings(packDir)
 	c := exec.Command(parts[0], parts[1:]...)
 	c.Dir = packDir
 	c.Env = agentEnv()
@@ -126,6 +127,56 @@ func ensureAgentContext(packDir string) {
 		text += agentContextBlock
 	}
 	os.WriteFile(path, []byte(text), 0644)
+}
+
+// agentAllowRules are Claude Code permission rules for our own tooling, so
+// the agent can run it without approval prompts.
+var agentAllowRules = []string{
+	"Bash(packwiz-tui:*)",
+	"Bash(packwiz:*)",
+	"Bash(mc-logs:*)",
+}
+
+// ensureAgentSettings merges agentAllowRules into the pack's project-level
+// .claude/settings.json, preserving anything else in the file.
+func ensureAgentSettings(packDir string) {
+	path := filepath.Join(packDir, ".claude", "settings.json")
+	var root map[string]any
+	if data, err := os.ReadFile(path); err == nil {
+		json.Unmarshal(data, &root)
+	}
+	if root == nil {
+		root = map[string]any{}
+	}
+	perms, _ := root["permissions"].(map[string]any)
+	if perms == nil {
+		perms = map[string]any{}
+	}
+	existing, _ := perms["allow"].([]any)
+	have := map[string]bool{}
+	for _, e := range existing {
+		if s, ok := e.(string); ok {
+			have[s] = true
+		}
+	}
+	changed := false
+	for _, rule := range agentAllowRules {
+		if !have[rule] {
+			existing = append(existing, rule)
+			changed = true
+		}
+	}
+	if !changed && len(existing) > 0 {
+		return
+	}
+	perms["allow"] = existing
+	root["permissions"] = perms
+	os.MkdirAll(filepath.Dir(path), 0755)
+	data, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return
+	}
+	os.WriteFile(path, append(data, '\n'), 0644)
 }
 
 type msgAgentDone struct{ err error }
