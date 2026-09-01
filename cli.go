@@ -36,6 +36,8 @@ commands:
                      self-updating from this repo), prism-preinstalled (same but with
                      all mods bundled), mrpack, curseforge, server, or all
   install-prism      write the self-updating instance into the local PrismLauncher
+  launch-client      install the pack client-side and start it via portablemc
+                     (fallback launcher — the TUI prefers PrismLauncher)
   nixos-config       print a services.minecraft-servers block for the nix-minecraft
                      flake module, ready to paste into nixos-configuration (glados-style)
   changelog          markdown changelog between two refs: mod adds/removals diffed
@@ -202,6 +204,13 @@ func RunCLI(args []string) (handled bool, exitCode int) {
 			return true, 1
 		}
 		fmt.Print(snippet)
+		return true, 0
+
+	case "launch-client":
+		if err := LaunchClient(findPack(), os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "FAILED: %v\n", err)
+			return true, 1
+		}
 		return true, 0
 
 	case "install-prism":
