@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -75,6 +76,167 @@ func FixModSources(packDir, side string) (string, error) {
 		return report.String() + "\n" + out, rerr
 	}
 	return report.String(), nil
+}
+
+// SourceCounts tallies the pack's mods by update source.
+type SourceCounts struct {
+	Curseforge int
+	Modrinth   int
+	Local      int // no update source — manually shipped files
+}
+
+// CountModSources classifies every mod metafile by its update source.
+func CountModSources(packDir string) SourceCounts {
+	var c SourceCounts
+	tomls, _ := filepath.Glob(filepath.Join(packDir, "mods", "*.toml"))
+	for _, t := range tomls {
+		data, err := os.ReadFile(t)
+		if err != nil {
+			continue
+		}
+		switch s := string(data); {
+		case strings.Contains(s, "[update.curseforge]"):
+			c.Curseforge++
+		case strings.Contains(s, "[update.modrinth]"):
+			c.Modrinth++
+		default:
+			c.Local++
+		}
+	}
+	return c
+}
+
+// ConvertSources attempts to move every mod (or just onlySlug, when set) to
+// the given source ("modrinth" or "curseforge"). Modrinth conversions are
+// byte-identical (sha1 lookup); curseforge conversions re-add by slug and
+// roll back to the original modrinth version if the slug isn't found. Local
+// mods are left alone.
+func ConvertSources(packDir, target, onlySlug string, progress io.Writer) error {
+	if target != "modrinth" && target != "curseforge" {
+		return fmt.Errorf("unknown target %q (want modrinth or curseforge)", target)
+	}
+	tomls, _ := filepath.Glob(filepath.Join(packDir, "mods", "*.pw.toml"))
+	sort.Strings(tomls)
+
+	converted, failed, skipped := 0, 0, 0
+	for _, toml := range tomls {
+		data, err := os.ReadFile(toml)
+		if err != nil {
+			continue
+		}
+		s := string(data)
+		isCF := strings.Contains(s, "[update.curseforge]")
+		isMR := strings.Contains(s, "[update.modrinth]")
+		if (target == "modrinth" && !isCF) || (target == "curseforge" && !isMR) {
+			continue // already on the target, or local
+		}
+		slug := strings.TrimSuffix(filepath.Base(toml), ".pw.toml")
+		if onlySlug != "" && slug != onlySlug {
+			continue
+		}
+		jar, _ := readTomlField(toml, "filename")
+		side, _ := readTomlField(toml, "side")
+
+		if target == "modrinth" {
+			sha1v, _ := readTomlField(toml, "hash")
+			hashFormat, _ := readTomlField(toml, "hash-format")
+			if hashFormat != "sha1" || sha1v == "" {
+				skipped++
+				fmt.Fprintf(progress, "  ✗ %s: no sha1 hash in metafile\n", slug)
+				continue
+			}
+			proj, ver, merr := modrinthLookupByHash(sha1v)
+			if merr != nil {
+				failed++
+				fmt.Fprintf(progress, "  ✗ %s: not on modrinth (%v)\n", slug, merr)
+				continue
+			}
+			if out, rerr := RunPackwiz(packDir, "remove", slug); rerr != nil {
+				failed++
+				fmt.Fprintf(progress, "  ✗ %s: packwiz remove failed: %s\n", slug, tail(out, 3))
+				continue
+			}
+			if out, aerr := RunPackwiz(packDir, "modrinth", "add", "--project-id", proj, "--version-id", ver, "-y"); aerr != nil {
+				failed++
+				fmt.Fprintf(progress, "  ✗ %s: modrinth add failed: %s\n", slug, tail(out, 3))
+				continue
+			}
+			restoreSide(packDir, slug, jar, side)
+			converted++
+			fmt.Fprintf(progress, "  ✓ %s → modrinth\n", slug)
+			continue
+		}
+
+		// modrinth → curseforge: re-add by slug, roll back on failure.
+		modID, _ := readTomlField(toml, "mod-id")
+		verID, _ := readTomlField(toml, "version")
+		if out, rerr := RunPackwiz(packDir, "remove", slug); rerr != nil {
+			failed++
+			fmt.Fprintf(progress, "  ✗ %s: packwiz remove failed: %s\n", slug, tail(out, 3))
+			continue
+		}
+		if out, aerr := RunPackwiz(packDir, "curseforge", "add", slug, "-y"); aerr != nil {
+			failed++
+			if modID != "" && verID != "" {
+				RunPackwiz(packDir, "modrinth", "add", "--project-id", modID, "--version-id", verID, "-y")
+				restoreSide(packDir, slug, jar, side)
+				fmt.Fprintf(progress, "  ✗ %s: not found on curseforge — kept on modrinth (%s)\n", slug, tail(out, 1))
+			} else {
+				fmt.Fprintf(progress, "  ✗ %s: curseforge add failed and no rollback info: %s\n", slug, tail(out, 3))
+			}
+			continue
+		}
+		restoreSide(packDir, slug, jar, side)
+		converted++
+		fmt.Fprintf(progress, "  ✓ %s → curseforge\n", slug)
+	}
+
+	if out, rerr := RunPackwiz(packDir, "refresh"); rerr != nil {
+		return fmt.Errorf("packwiz refresh failed: %s", tail(out, 5))
+	}
+	fmt.Fprintf(progress, "done: %d converted, %d failed, %d skipped\n", converted, failed, skipped)
+	return nil
+}
+
+// restoreSide re-applies the original side tag to a freshly re-added mod,
+// locating it by slug first and file name second.
+func restoreSide(packDir, slug, jar, side string) {
+	if side == "" {
+		return
+	}
+	path := filepath.Join(packDir, "mods", slug+".pw.toml")
+	if _, err := os.Stat(path); err == nil {
+		writeTomlSide(path, side)
+		return
+	}
+	if jar != "" {
+		if toml, err := findTomlByFilename(packDir, jar); err == nil {
+			writeTomlSide(toml, side)
+		}
+	}
+}
+
+var reOptionalLine = regexp.MustCompile(`(?m)^\s*optional\s*=\s*(true|false)\s*$`)
+
+// writeTomlOptional sets (or adds) the [option] optional flag in a metafile.
+func writeTomlOptional(path string, optional bool) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	s := string(data)
+	line := fmt.Sprintf("optional = %v", optional)
+	if reOptionalLine.MatchString(s) {
+		s = reOptionalLine.ReplaceAllString(s, line)
+	} else if optional {
+		if !strings.HasSuffix(s, "\n") {
+			s += "\n"
+		}
+		s += "\n[option]\n" + line + "\n"
+	} else {
+		return nil // already non-optional
+	}
+	return os.WriteFile(path, []byte(s), 0644)
 }
 
 var reBlockedJar = regexp.MustCompile(`save this file to .*[/\\]([^/\\]+\.jar)`)

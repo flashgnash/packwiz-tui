@@ -29,6 +29,9 @@ commands:
   test full          server + real headless client (gamescope), soak, screenshots
   tag-sides <zip>    set side=client/both on all mods by diffing a server-pack zip
   fix-sources        swap CurseForge-API-blocked mods to Modrinth (byte-identical files)
+  convert-sources <target>
+                     convert every mod to modrinth (byte-identical, sha1) or
+                     curseforge (by slug, rolled back if not found)
   export <what>      build artifacts into .packwiz-tui/build/ — prism (importable,
                      self-updating from this repo), prism-preinstalled (same but with
                      all mods bundled), mrpack, curseforge, server, or all
@@ -115,6 +118,21 @@ func RunCLI(args []string) (handled bool, exitCode int) {
 		report, err := TagSides(findPack(), args[1])
 		fmt.Print(report)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "FAILED: %v\n", err)
+			return true, 1
+		}
+		return true, 0
+
+	case "convert-sources":
+		if len(args) < 2 || (args[1] != "modrinth" && args[1] != "curseforge") {
+			fmt.Fprintln(os.Stderr, "usage: packwiz-tui convert-sources modrinth|curseforge [slug]")
+			return true, 1
+		}
+		onlySlug := ""
+		if len(args) > 2 {
+			onlySlug = args[2]
+		}
+		if err := ConvertSources(findPack(), args[1], onlySlug, os.Stdout); err != nil {
 			fmt.Fprintf(os.Stderr, "FAILED: %v\n", err)
 			return true, 1
 		}
