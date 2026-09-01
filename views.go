@@ -3,8 +3,10 @@ package main
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	ansitruncate "github.com/muesli/reflow/truncate"
 )
 
 // ── Loading ───────────────────────────────────────────────────────────────────
@@ -22,41 +24,69 @@ func (a *App) viewLoading() string {
 // ── Repo select ───────────────────────────────────────────────────────────────
 
 func (a *App) viewRepoSelect() string {
-	var rows []string
-	rows = append(rows, styleTitle.Render("  Recent Repositories"), "")
+	a.clickZones = nil
+	pw := clamp(64, 40, a.width-8) // card interior width
 
+	// Repo list card.
+	var rows []string
+	rows = append(rows, styleCardTitle.Render("Recent Repositories"), "")
 	for i, repo := range a.repoList {
 		if i == a.repoListIdx {
 			rows = append(rows,
-				styleRepoItemSelected.Render(" ▶  "+repo.Name),
-				styleRepoPath.Render("     "+truncate(repo.Path, 56)),
-				"",
-			)
+				styleCardAccent.Render("▸ "+truncate(repo.Name, pw-2)),
+				styleCardMuted.Render("  "+truncate(repo.Path, pw-2)),
+				"")
 		} else {
 			rows = append(rows,
-				styleRepoItem.Render("    "+repo.Name),
-				styleRepoPath.Render("     "+truncate(repo.Path, 56)),
-				"",
-			)
+				styleCardText.Copy().Bold(true).Render("  "+truncate(repo.Name, pw-2)),
+				styleCardMuted.Render("  "+truncate(repo.Path, pw-2)),
+				"")
 		}
 	}
-
-	// Clone new entry
-	if a.repoListIdx == len(a.repoList) {
-		rows = append(rows, styleRepoItemSelected.Render(" ▶  + Clone new repository"))
-	} else {
-		rows = append(rows, styleRepoItem.Render("    ")+styleAddBtn.Render("+ Clone new repository"))
+	if len(a.repoList) == 0 {
+		rows = append(rows, styleCardMuted.Render("no recent repositories"), "")
 	}
+	panel := card(rows[:len(rows)-1], pw, a.repoListIdx < len(a.repoList))
 
-	panelW := clamp(70, 40, a.width-4)
-	panel := stylePanelFocused.Width(panelW).Render(strings.Join(rows, "\n"))
+	// Clone / Create as bordered buttons below the card.
+	makeBtn := func(label string, selected bool) string {
+		st := styleCardText
+		if selected {
+			st = styleCardAccent
+		}
+		return card([]string{st.Render(label)}, lipgloss.Width(label), selected)
+	}
+	cloneBtn := makeBtn("+ Clone repository", a.repoListIdx == len(a.repoList))
+	createBtn := makeBtn("✦ Create repository", a.repoListIdx == len(a.repoList)+1)
+	btnRow := lipgloss.JoinHorizontal(lipgloss.Top, cloneBtn, "  ", createBtn)
 
 	content := lipgloss.JoinVertical(lipgloss.Center,
 		renderLogo(),
-		styleLogoSub.Render("  Minecraft Modpack Manager"),
+		styleLogoSub.Render("Minecraft Modpack Manager"),
 		"",
 		panel,
+		"",
+		btnRow,
 	)
+
+	// Register click zones from the same centering math Place uses.
+	cw, ch := lipgloss.Width(content), lipgloss.Height(content)
+	cx := maxInt(0, (a.width-cw)/2)
+	cy := maxInt(0, (a.height-1-ch)/2)
+	logoH := lipgloss.Height(renderLogo()) + 2 // logo + subtitle + blank
+	panelX := cx + (cw-lipgloss.Width(panel))/2
+	for i := range a.repoList {
+		a.clickZones = append(a.clickZones, clickZone{
+			x: panelX, y: cy + logoH + 1 + 2 + i*3, w: lipgloss.Width(panel), h: 2,
+			action: fmt.Sprintf("repo:%d", i),
+		})
+	}
+	btnY := cy + logoH + lipgloss.Height(panel) + 1
+	btnX := cx + (cw-lipgloss.Width(btnRow))/2
+	a.clickZones = append(a.clickZones,
+		clickZone{x: btnX, y: btnY, w: lipgloss.Width(cloneBtn), h: 3, action: "repo:clone"},
+		clickZone{x: btnX + lipgloss.Width(cloneBtn) + 2, y: btnY, w: lipgloss.Width(createBtn), h: 3, action: "repo:create"})
+
 	return lipgloss.Place(a.width, a.height-1, lipgloss.Center, lipgloss.Center, content)
 }
 
@@ -77,6 +107,42 @@ func (a *App) viewCloneRepo() string {
 			errLine,
 			"",
 			styleSubtitle.Render("  enter to clone  ·  esc to go back"),
+		),
+	)
+	return lipgloss.Place(a.width, a.height-1, lipgloss.Center, lipgloss.Center, panel)
+}
+
+// ── Create repo ───────────────────────────────────────────────────────────────
+
+func (a *App) viewCreateRepo() string {
+	errLine := ""
+	if a.createError != "" {
+		errLine = "\n" + styleOutputError.Render("  ✗ "+a.createError)
+	}
+
+	var privBtn, pubBtn string
+	if a.createPrivate {
+		privBtn = styleMenuItemSelected.Render("  Private  ")
+		pubBtn = styleMenuItem.Render("  Public  ")
+	} else {
+		privBtn = styleMenuItem.Render("  Private  ")
+		pubBtn = styleMenuItemSelected.Render("  Public  ")
+	}
+	visRow := styleSearchLabel.Render("  Visibility: ") +
+		lipgloss.JoinHorizontal(lipgloss.Left, privBtn, "   ", pubBtn)
+
+	panelW := clamp(64, 40, a.width-4)
+	panel := stylePanelFocused.Width(panelW).Render(
+		lipgloss.JoinVertical(lipgloss.Left,
+			styleTitle.Render("  Create Repository"),
+			styleSubtitle.Render("  Creates a GitHub repo via gh, then runs packwiz init"),
+			"",
+			styleSearchLabel.Render("  Name: ")+a.createNameInput.View(),
+			"",
+			visRow,
+			errLine,
+			"",
+			styleSubtitle.Render("  enter to create  ·  tab to toggle visibility  ·  esc to go back"),
 		),
 	)
 	return lipgloss.Place(a.width, a.height-1, lipgloss.Center, lipgloss.Center, panel)
@@ -107,6 +173,839 @@ func (a *App) viewServerIP() string {
 // ── Main menu ─────────────────────────────────────────────────────────────────
 
 func (a *App) viewMainMenu() string {
+	if a.wideHome() {
+		return a.viewHome()
+	}
+	return a.viewMainMenuList()
+}
+
+// viewHome renders the full-screen dashboard: header (pack title + server
+// address), mods pane on the left, and agent chat with the action buttons
+// beneath it on the right.
+func (a *App) viewHome() string {
+	a.clickZones = nil
+	w, bodyH := a.width, a.height-1
+
+	// ── Header: PACK + PATH cards left, IP + LOADER cards right ──
+	pencil := styleCardAccent.Render(" ✎")
+	// lipgloss v0.10 setters share the underlying rules map — always Copy()
+	// before deriving from a package-level style or the original mutates.
+	boldText := styleCardText.Copy().Bold(true)
+
+	ipVal := a.serverAddr
+	if ipVal == "" {
+		ipVal = "(not set)"
+	}
+	loaderVal := "(unknown)"
+	if a.packMeta.Loader != "" {
+		loaderVal = strings.TrimSpace(a.packMeta.Loader + " " + a.packMeta.LoaderVer)
+		if a.packMeta.Minecraft != "" {
+			loaderVal += " minecraft " + a.packMeta.Minecraft
+		}
+	}
+
+	headerCard := func(label, value string, focused bool) string {
+		labelStyle := styleCardTitleDim
+		if focused {
+			labelStyle = styleCardTitle
+		}
+		cw := lipgloss.Width(value)
+		if lw := lipgloss.Width(label); lw > cw {
+			cw = lw
+		}
+		return card([]string{labelStyle.Render(label), value}, cw, focused)
+	}
+	packBox := headerCard("PACK", boldText.Render(truncate(a.packName, w/3)), false)
+
+	// Shrink the IP/loader values together until the header row fits.
+	var ipBox, loaderBox string
+	for cut := 0; ; cut++ {
+		iv := truncate(ipVal, maxInt(6, len([]rune(ipVal))-cut))
+		lv := truncate(loaderVal, maxInt(6, len([]rune(loaderVal))-cut))
+		ipBox = headerCard("IP", boldText.Render(iv)+pencil, a.homeFocus == 3)
+		// No pencil on the loader — it can't be edited from here (yet).
+		loaderBox = headerCard("LOADER", boldText.Render(lv), a.homeFocus == 4)
+		if lipgloss.Width(packBox)+2+lipgloss.Width(ipBox)+lipgloss.Width(loaderBox) <= w ||
+			(len([]rune(ipVal))-cut <= 6 && len([]rune(loaderVal))-cut <= 6) {
+			break
+		}
+	}
+
+	// Left group: PACK always; PATH and REPO share whatever width is left.
+	leftCards := []string{packBox}
+	leftActs := []string{""}
+	free := w - lipgloss.Width(packBox) - lipgloss.Width(ipBox) - lipgloss.Width(loaderBox) - 2
+	repoDisp := strings.TrimPrefix(repoWebURL(a.repoRemote), "https://")
+	linkArrow := styleCardAccent.Render(" ↗")
+	switch {
+	case repoDisp != "" && free-12 >= 16:
+		avail := free - 12 // both cards' chrome + gaps + the link arrow
+		pf, rf := len([]rune(a.packDir)), len([]rune(repoDisp))
+		if pf+rf > avail {
+			half := avail / 2
+			switch {
+			case pf <= half:
+				rf = avail - pf
+			case rf <= half:
+				pf = avail - rf
+			default:
+				pf, rf = half, avail-half
+			}
+		}
+		leftCards = append(leftCards,
+			headerCard("PATH", boldText.Render(truncate(a.packDir, pf)), false),
+			headerCard("REPO", boldText.Render(truncate(repoDisp, rf))+linkArrow, false))
+		leftActs = append(leftActs, "", "home:repourl")
+	case repoDisp != "" && free-7 >= 8:
+		leftCards = append(leftCards,
+			headerCard("REPO", boldText.Render(truncate(repoDisp, free-7))+linkArrow, false))
+		leftActs = append(leftActs, "home:repourl")
+	case free-5 >= 8:
+		leftCards = append(leftCards,
+			headerCard("PATH", boldText.Render(truncate(a.packDir, free-5)), false))
+		leftActs = append(leftActs, "")
+	}
+	var leftParts []string
+	lx := 0
+	for i, c := range leftCards {
+		if i > 0 {
+			leftParts = append(leftParts, " ")
+			lx++
+		}
+		if leftActs[i] != "" {
+			a.clickZones = append(a.clickZones, clickZone{
+				x: lx, y: 0, w: lipgloss.Width(c), h: 4, action: leftActs[i],
+			})
+		}
+		lx += lipgloss.Width(c)
+		leftParts = append(leftParts, c)
+	}
+	left := lipgloss.JoinHorizontal(lipgloss.Top, leftParts...)
+	right := lipgloss.JoinHorizontal(lipgloss.Top, ipBox, " ", loaderBox)
+	spacer := w - lipgloss.Width(left) - lipgloss.Width(right)
+	if spacer < 1 {
+		spacer = 1
+	}
+	header := lipgloss.JoinHorizontal(lipgloss.Top, left, strings.Repeat(" ", spacer), right)
+	headerH := lipgloss.Height(header)
+
+	ipX := lipgloss.Width(left) + spacer
+	a.clickZones = append(a.clickZones, clickZone{
+		x: ipX, y: 0, w: lipgloss.Width(ipBox), h: headerH, action: "home:editaddr",
+	})
+	a.clickZones = append(a.clickZones, clickZone{
+		x: ipX + lipgloss.Width(ipBox) + 1, y: 0, w: lipgloss.Width(loaderBox), h: headerH,
+		action: "home:loaderbox",
+	})
+
+	paneTop := headerH
+	midH := bodyH - paneTop
+
+	// ── Fullscreen agent ──
+	if a.agentFull {
+		body := lipgloss.Place(w, bodyH, lipgloss.Left, lipgloss.Top,
+			lipgloss.JoinVertical(lipgloss.Left, header,
+				a.renderAgentPane(w, midH, 0, paneTop)))
+		return cropBody(body, bodyH, w)
+	}
+
+	modsTotalW := clamp(2*w/5, 40, 64)
+	rcW := w - modsTotalW - 1 // right column width
+	rcX := modsTotalW + 1
+
+	// ── Action buttons: left group flow-wraps, exit pair right-aligns ──
+	type btnPos struct{ idx, x, w int }
+	var btnRows [][]btnPos
+	{
+		x := 0
+		var row []btnPos
+		for i := 0; i < homeBtnRightStart && i < len(homeButtons); i++ {
+			bw := lipgloss.Width(a.homeBtnPlain(i)) + 4 // padding + border
+			if x+bw > rcW && len(row) > 0 {
+				btnRows = append(btnRows, row)
+				row = nil
+				x = 0
+			}
+			row = append(row, btnPos{idx: i, x: x, w: bw})
+			x += bw + 1
+		}
+		// Right-aligned exit group: same row if it fits, else its own row.
+		rightW := 0
+		var rws []int
+		for i := homeBtnRightStart; i < len(homeButtons); i++ {
+			bw := lipgloss.Width(a.homeBtnPlain(i)) + 4
+			rws = append(rws, bw)
+			rightW += bw + 1
+		}
+		rightW--
+		xr := rcW - rightW
+		if xr < x {
+			if len(row) > 0 {
+				btnRows = append(btnRows, row)
+				row = nil
+			}
+			xr = maxInt(0, rcW-rightW)
+		}
+		for k, i := 0, homeBtnRightStart; i < len(homeButtons); k, i = k+1, i+1 {
+			row = append(row, btnPos{idx: i, x: xr, w: rws[k]})
+			xr += rws[k] + 1
+		}
+		btnRows = append(btnRows, row)
+
+		// When wrapping was forced, the left/right split reads ragged —
+		// center every row instead.
+		if len(btnRows) > 1 {
+			for r := range btnRows {
+				row := btnRows[r]
+				if len(row) == 0 {
+					continue
+				}
+				span := row[len(row)-1].x + row[len(row)-1].w - row[0].x
+				shift := (rcW-span)/2 - row[0].x
+				for i := range row {
+					row[i].x += shift
+				}
+			}
+		}
+	}
+	btnH := len(btnRows) * 3
+	agentH := midH - btnH
+	if agentH < 8 {
+		agentH = 8
+	}
+
+	// ── Panes: [mod detail] [agent] [command output], sharing the column ──
+	modsPanel := a.renderHomeModsPane(modsTotalW, midH, paneTop)
+	nPanes := 1
+	if a.modDetail != nil {
+		nPanes++
+	}
+	if a.cmdTitle != "" {
+		nPanes++
+	}
+	sideW := rcW
+	if nPanes > 1 {
+		sideW = (rcW - (nPanes - 1)) / nPanes
+	}
+	agentW := rcW - (nPanes-1)*(sideW+1)
+	var rowParts []string
+	px := rcX
+	if a.modDetail != nil {
+		rowParts = append(rowParts, a.renderModDetailPane(sideW, agentH, px, paneTop), " ")
+		px += sideW + 1
+	}
+	rowParts = append(rowParts, a.renderAgentPane(agentW, agentH, px, paneTop))
+	px += agentW + 1
+	if a.cmdTitle != "" {
+		rowParts = append(rowParts, " ", a.renderCmdPane(sideW, agentH, px, paneTop))
+	}
+	agentRow := lipgloss.JoinHorizontal(lipgloss.Top, rowParts...)
+
+	btnTop := paneTop + agentH
+	var btnRowStrs []string
+	for r, row := range btnRows {
+		var cells []string
+		curX := 0
+		for _, bp := range row {
+			if pad := bp.x - curX; pad > 0 {
+				cells = append(cells, strings.Repeat(" ", pad))
+			}
+			b := homeButtons[bp.idx]
+			focusedBtn := a.homeFocus == 2 && bp.idx == a.homeBtnIdx
+			labelStyle := styleCardText
+			if focusedBtn {
+				labelStyle = styleCardAccent
+			}
+			plain := a.homeBtnPlain(bp.idx)
+			base := b.icon + " " + b.label
+			content := labelStyle.Render(base)
+			// The Push & Exit change count is always accent-coloured.
+			if extra := strings.TrimPrefix(plain, base); extra != "" {
+				content += styleCardAccent.Render(extra)
+			}
+			cells = append(cells, card([]string{content}, lipgloss.Width(plain), focusedBtn))
+			a.clickZones = append(a.clickZones, clickZone{
+				x: rcX + bp.x, y: btnTop + r*3, w: bp.w, h: 3,
+				action: fmt.Sprintf("home:btn:%d", bp.idx),
+			})
+			curX = bp.x + bp.w
+		}
+		btnRowStrs = append(btnRowStrs, lipgloss.JoinHorizontal(lipgloss.Top, cells...))
+	}
+	rightCol := lipgloss.JoinVertical(lipgloss.Left,
+		append([]string{agentRow}, btnRowStrs...)...)
+
+	mid := lipgloss.JoinHorizontal(lipgloss.Top, modsPanel, " ", rightCol)
+
+	body := lipgloss.Place(w, bodyH, lipgloss.Left, lipgloss.Top,
+		lipgloss.JoinVertical(lipgloss.Left, header, mid))
+	body = cropBody(body, bodyH, w)
+
+	if a.addModModal {
+		// Underlying zones must not respond while the modal is up.
+		a.clickZones = nil
+		return a.renderWithModal(body, a.viewAddModModal())
+	}
+	if a.infoTitle != "" {
+		// Click anywhere dismisses the popup; underlying zones are dropped.
+		a.clickZones = []clickZone{{x: 0, y: 0, w: w, h: bodyH, action: "home:modaldismiss"}}
+		return a.renderWithModal(body, a.viewInfoModal())
+	}
+	if a.approvePending != nil {
+		modal, btnXs, btnWs, btnLine := a.viewApproveModal()
+		mW := lipgloss.Width(strings.Split(modal, "\n")[0])
+		mH := lipgloss.Height(modal)
+		mx := maxInt(0, (w-mW)/2)
+		my := maxInt(0, (bodyH-mH)/2)
+		acts := []string{"approve:allow", "approve:always", "approve:deny"}
+		a.clickZones = nil
+		for i, act := range acts {
+			a.clickZones = append(a.clickZones, clickZone{
+				x: mx + 3 + btnXs[i], y: my + 2 + btnLine, w: btnWs[i], h: 1, action: act,
+			})
+		}
+		return a.renderWithModal(body, modal)
+	}
+	if a.confirmDiscard {
+		danger := lipgloss.NewStyle().Foreground(colorDanger).Bold(true)
+		dim := lipgloss.NewStyle().Foreground(colorMuted)
+		modal := styleModal.Render(lipgloss.JoinVertical(lipgloss.Left,
+			danger.Render("⟲ Discard changes"),
+			"",
+			lipgloss.NewStyle().Foreground(colorText).Render(
+				fmt.Sprintf("Reset %d changed file(s) to the last commit?", a.changedCount)),
+			dim.Render("This cannot be undone."),
+			"",
+			dim.Render("enter/y discard  ·  esc/n cancel"),
+		))
+		a.clickZones = []clickZone{{x: 0, y: 0, w: w, h: bodyH, action: "home:discardcancel"}}
+		return a.renderWithModal(body, modal)
+	}
+	if a.sourcesModal {
+		modal, btnXs, btnWs, btnLine := a.viewSourcesModal()
+		mW := lipgloss.Width(strings.Split(modal, "\n")[0])
+		mH := lipgloss.Height(modal)
+		mx := maxInt(0, (w-mW)/2)
+		my := maxInt(0, (bodyH-mH)/2)
+		// styleModal: 1 border + Padding(1,2) → content offset (+3, +2).
+		a.clickZones = []clickZone{
+			{x: mx + 3 + btnXs[0], y: my + 2 + btnLine, w: btnWs[0], h: 1, action: "home:srcconv:cf"},
+			{x: mx + 3 + btnXs[1], y: my + 2 + btnLine, w: btnWs[1], h: 1, action: "home:srcconv:mr"},
+			{x: 0, y: 0, w: w, h: bodyH, action: "home:srcdismiss"},
+		}
+		return a.renderWithModal(body, modal)
+	}
+	return body
+}
+
+// viewSourcesModal renders the mod-sources popup and returns the convert
+// buttons' x offsets/widths and content line for click zones.
+func (a *App) viewSourcesModal() (string, [2]int, [2]int, int) {
+	c := a.sourceCounts
+	colCF := fmt.Sprintf("CURSEFORGE (%d)", c.Curseforge)
+	colLocal := fmt.Sprintf("LOCAL (%d)", c.Local)
+	colMR := fmt.Sprintf("MODRINTH (%d)", c.Modrinth)
+	const btnTxt = " Convert All "
+	gap := 4
+	w0 := maxInt(len(colCF), len(btnTxt))
+	w1 := len(colLocal)
+	w2 := maxInt(len(colMR), len(btnTxt))
+	total := w0 + gap + w1 + gap + w2
+
+	center := func(s string, w int) (string, int) {
+		off := maxInt(0, (w-lipgloss.Width(s))/2)
+		return strings.Repeat(" ", off) + s, off
+	}
+
+	title, _ := center(styleModalTitle.Render("◈ Mods"), total)
+
+	dim := lipgloss.NewStyle().Foreground(colorMuted).Bold(true)
+	cfHdr, _ := center(dim.Render(colCF), w0)
+	localHdr, _ := center(dim.Render(colLocal), w1)
+	mrHdr, _ := center(dim.Render(colMR), w2)
+	countsRow := cfHdr + strings.Repeat(" ", w0-lipgloss.Width(cfHdr)+gap) + localHdr +
+		strings.Repeat(" ", w1-lipgloss.Width(localHdr)+gap) + mrHdr
+
+	cfBtnStr := styleBtn.Render(btnTxt)
+	mrBtnStr := styleBtn.Render(btnTxt)
+	if a.sourcesSel == 0 {
+		cfBtnStr = styleBtnFocused.Render(btnTxt)
+	} else {
+		mrBtnStr = styleBtnFocused.Render(btnTxt)
+	}
+	cfOff := (w0 - len(btnTxt)) / 2
+	mrOff := w0 + gap + w1 + gap + (w2-len(btnTxt))/2
+	btnRow := strings.Repeat(" ", cfOff) + cfBtnStr +
+		strings.Repeat(" ", mrOff-cfOff-len(btnTxt)) + mrBtnStr
+
+	hint := lipgloss.NewStyle().Foreground(colorMuted).Render("←→ select  ·  enter convert  ·  esc close")
+	hintRow, _ := center(hint, total)
+
+	content := lipgloss.JoinVertical(lipgloss.Left,
+		title, "", countsRow, "", btnRow, "", hintRow)
+	// Content lines: 0 title, 1 blank, 2 counts, 3 blank, 4 buttons…
+	return styleModal.Render(content),
+		[2]int{cfOff, mrOff}, [2]int{len(btnTxt), len(btnTxt)}, 4
+}
+
+// viewApproveModal renders the agent permission dialog and returns the
+// button offsets/widths and content line for click zones.
+func (a *App) viewApproveModal() (string, [3]int, [3]int, int) {
+	r := a.approvePending
+	warn := lipgloss.NewStyle().Foreground(colorWarning).Bold(true)
+	dim := lipgloss.NewStyle().Foreground(colorMuted)
+	textStyle := lipgloss.NewStyle().Foreground(colorText)
+
+	const boxW = 64
+	var lines []string
+	lines = append(lines, warn.Render("⚠ Agent permission request"), "")
+	lines = append(lines, dim.Render("tool: ")+textStyle.Bold(true).Render(r.ToolName))
+	for i, wl := range wrapText(approveDetail(r), boxW) {
+		if i >= 6 {
+			lines = append(lines, dim.Render("…"))
+			break
+		}
+		lines = append(lines, textStyle.Render(wl))
+	}
+	lines = append(lines, "")
+
+	allowBtn := styleBtnFocused.Render(" Allow ")
+	alwaysBtn := styleBtn.Render(" Always allow ")
+	denyBtn := lipgloss.NewStyle().Foreground(colorOnAccent).Background(colorDanger).Bold(true).Padding(0, 1).Render(" Deny ")
+	var xs, ws [3]int
+	xs[0] = 0
+	ws[0] = lipgloss.Width(allowBtn)
+	xs[1] = xs[0] + ws[0] + 2
+	ws[1] = lipgloss.Width(alwaysBtn)
+	xs[2] = xs[1] + ws[1] + 2
+	ws[2] = lipgloss.Width(denyBtn)
+	btnLine := len(lines)
+	lines = append(lines, allowBtn+"  "+alwaysBtn+"  "+denyBtn)
+	lines = append(lines, "", dim.Render("y allow · w always · n/esc deny"))
+
+	return styleModal.Render(lipgloss.JoinVertical(lipgloss.Left, lines...)), xs, ws, btnLine
+}
+
+// viewInfoModal renders the info/warning popup shown over the home screen.
+func (a *App) viewInfoModal() string {
+	titleStyle := styleModalTitle
+	icon := "✓"
+	if a.infoErr {
+		titleStyle = lipgloss.NewStyle().Foreground(colorDanger).Bold(true)
+		icon = "⚠"
+	}
+	modalText := lipgloss.NewStyle().Foreground(colorMuted)
+	lines := []string{titleStyle.Render(icon + " " + a.infoTitle), ""}
+	for _, l := range wrapText(a.infoText, 56) {
+		lines = append(lines, lipgloss.NewStyle().Foreground(colorText).Render(l))
+	}
+	lines = append(lines, "", modalText.Render("enter to dismiss"))
+	return styleModal.Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+}
+
+// renderCmdPane renders the live command output pane (right of the agent
+// chat) and registers its close/kill button zone.
+func (a *App) renderCmdPane(totalW, h, paneX, paneTop int) string {
+	aw := totalW - 4
+
+	var status string
+	switch {
+	case a.cmdRunning:
+		status = styleCardAccent.Render(spinnerFrames[a.spinFrame] + " ")
+	case a.cmdErr != nil:
+		status = lipgloss.NewStyle().Foreground(colorDanger).Background(colorBgPanel).Bold(true).Render("✗ ")
+	default:
+		status = styleCardAccent.Render("✓ ")
+	}
+	closeBtn := styleCardAccent.Render("✕")
+	titleTxt := status + styleCardTitle.Render(truncate(a.cmdTitle, maxInt(4, aw-6)))
+	pad := aw - lipgloss.Width(titleTxt) - lipgloss.Width(closeBtn)
+	if pad < 1 {
+		pad = 1
+	}
+	title := titleTxt + styleCardFill.Render(strings.Repeat(" ", pad)) + closeBtn
+	a.clickZones = append(a.clickZones, clickZone{
+		x: paneX + 2 + aw - 2, y: paneTop + 1, w: 3, h: 1, action: "home:cmdclose",
+	})
+
+	contentH := h - 3 // borders + title
+	if contentH < 1 {
+		contentH = 1
+	}
+	var lines []string
+	if a.cmdDone && a.cmdSummary != nil {
+		lines = renderTestSummary(a.cmdSummary, aw)
+	} else {
+		// Tail the raw lines first so wrapping stays cheap, then tail again.
+		raw := a.cmdLines
+		if len(raw) > contentH {
+			raw = raw[len(raw)-contentH:]
+		}
+		for _, l := range raw {
+			for _, wl := range wrapText(l, aw) {
+				lines = append(lines, styleCardText.Render(wl))
+			}
+		}
+		if len(lines) > contentH {
+			lines = lines[len(lines)-contentH:]
+		}
+		if a.cmdDone && a.cmdErr != nil {
+			errLine := lipgloss.NewStyle().Foreground(colorDanger).Background(colorBgPanel).Render(truncate("✗ "+a.cmdErr.Error(), aw))
+			if len(lines) >= contentH {
+				lines = lines[1:]
+			}
+			lines = append(lines, errLine)
+		}
+		if a.cmdDone && !a.cmdCloseAt.IsZero() {
+			secs := int(time.Until(a.cmdCloseAt).Seconds()) + 1
+			if secs < 0 {
+				secs = 0
+			}
+			lines = append(lines, "",
+				styleCardMuted.Render(fmt.Sprintf("auto-closing in %ds", secs)))
+		}
+	}
+	if len(lines) > contentH {
+		lines = lines[:contentH]
+	}
+	for len(lines) < contentH {
+		lines = append(lines, "")
+	}
+
+	a.clickZones = append(a.clickZones, clickZone{
+		x: paneX, y: paneTop, w: totalW, h: h, action: "home:focus:agent",
+	})
+	return card(append([]string{title}, lines...), aw, false)
+}
+
+// padCard pads (or ANSI-aware crops) a content line to interior width w with
+// the card background, adding the one-column side padding on each edge. The
+// crop keeps a single over-wide line (e.g. a textinput rendering a phantom
+// cursor column) from widening the whole card and staggering the layout.
+func padCard(line string, w int) string {
+	if lipgloss.Width(line) > w {
+		line = ansitruncate.String(line, uint(w))
+	}
+	gap := w - lipgloss.Width(line)
+	if gap < 0 {
+		gap = 0
+	}
+	return styleCardFill.Render(" ") + line + styleCardFill.Render(strings.Repeat(" ", gap+1))
+}
+
+// card wraps content lines (interior width w) in a rounded border over the
+// light card fill. Total rendered width is w+4.
+func card(lines []string, w int, focused bool) string {
+	st := styleCardBorder
+	if focused {
+		st = styleCardBorderFoc
+	}
+	return cardStyled(lines, w, st)
+}
+
+// cardStyled is card() with an arbitrary border style (e.g. danger red).
+func cardStyled(lines []string, w int, borderStyle lipgloss.Style) string {
+	padded := make([]string, len(lines))
+	for i, l := range lines {
+		padded[i] = padCard(l, w)
+	}
+	return borderStyle.Render(strings.Join(padded, "\n"))
+}
+
+// cropLines hard-limits s to n lines — a safety net so a mis-measured pane
+// can never push the layout off-screen and scroll the terminal.
+func cropLines(s string, n int) string {
+	lines := strings.Split(s, "\n")
+	if len(lines) > n {
+		lines = lines[:n]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// cropBody bounds the final composed body to h lines × w columns.
+func cropBody(s string, h, w int) string {
+	lines := strings.Split(s, "\n")
+	if len(lines) > h {
+		lines = lines[:h]
+	}
+	for i, l := range lines {
+		if lipgloss.Width(l) > w {
+			lines[i] = ansitruncate.String(l, uint(w))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// renderHomeModsPane renders the embedded mod list pane and registers its
+// click zones (pane occupies x ∈ [0, totalW), y ∈ [paneTop, paneTop+midH)).
+func (a *App) renderHomeModsPane(totalW, midH, paneTop int) string {
+	mw := totalW - 4 // interior width (borders + padding)
+	focused := a.homeFocus == 0
+
+	titleStyle := styleCardTitleDim
+	if focused {
+		titleStyle = styleCardTitle
+	}
+	gitStats := ""
+	if n := len(a.modsAdded); n > 0 {
+		gitStats += lipgloss.NewStyle().Foreground(colorSuccess).Background(colorBgPanel).Render(fmt.Sprintf(" +%d", n))
+	}
+	if n := len(a.modsDeleted); n > 0 {
+		gitStats += lipgloss.NewStyle().Foreground(colorDanger).Background(colorBgPanel).Render(fmt.Sprintf(" -%d", n))
+	}
+	title := titleStyle.Render(fmt.Sprintf("◈ Mods (%d)", len(a.modsFiltered))) + gitStats
+
+	// Search row: "/ <input>  +"
+	const addStr = " + "
+	searchPrefixStr := "/ "
+	searchPrefix := styleCardMuted.Render(searchPrefixStr)
+	if a.searchFocus {
+		searchPrefix = styleCardAccent.Render(searchPrefixStr)
+	}
+	a.searchInput.Width = mw - len(searchPrefixStr) - len(addStr) - 3
+	inputView := a.searchInput.View()
+	// Right-align the add button from the actual rendered width so the row
+	// always comes out exactly mw wide.
+	gap := mw - lipgloss.Width(searchPrefix) - lipgloss.Width(inputView) - len(addStr)
+	if gap < 0 {
+		gap = 0
+	}
+	searchRow := searchPrefix + inputView + styleCardFill.Render(strings.Repeat(" ", gap)) + styleAddBtn.Render(addStr)
+	a.clickZones = append(a.clickZones, clickZone{
+		x: 2 + mw - len(addStr), y: paneTop + 2, w: len(addStr), h: 1,
+		action: "add_mod",
+	})
+
+	// Mod rows.
+	listH := midH - 2 - 3 // borders, title, search, blank
+	if listH < 1 {
+		listH = 1
+	}
+	const delStr = " − "
+	delW := lipgloss.Width(delStr) // NOT len() — the − glyph is 3 bytes wide
+	const statusIndicatorW = 2
+	// The item styles carry PaddingLeft(1), so leave 2 columns beyond the
+	// name+button or every row wraps and staggers the whole layout.
+	nameW := mw - delW - statusIndicatorW - 2
+
+	cardSpace := styleCardFill.Render(" ")
+	itemStyle := styleCardText.Copy().PaddingLeft(1)
+	itemSelDim := styleCardAccent.Copy().PaddingLeft(1)
+	itemDel := styleCardMuted.Copy().Strikethrough(true).PaddingLeft(1)
+	addedStyle := lipgloss.NewStyle().Foreground(colorSuccess).Background(colorBgPanel)
+	modifiedStyle := lipgloss.NewStyle().Foreground(colorAccent2).Bold(true).Background(colorBgPanel)
+
+	var rows []string
+	if len(a.modsFiltered) == 0 {
+		rows = append(rows, styleCardMuted.Render("  no mods found"))
+	}
+	for i, mod := range a.modsFiltered {
+		isDeleted := a.modsDeleted[mod.Path]
+		var statusIndicator string
+		switch {
+		case isDeleted:
+			statusIndicator = styleDeleteBtn.Render("D") + cardSpace
+		case a.modsAdded[mod.Path]:
+			statusIndicator = addedStyle.Render("A") + cardSpace
+		case a.modsModified[mod.Path]:
+			statusIndicator = modifiedStyle.Render("M") + cardSpace
+		default:
+			statusIndicator = cardSpace + cardSpace
+		}
+		name := truncate(mod.Name, nameW)
+		pad := strings.Repeat(" ", nameW-lipgloss.Width(name))
+		var del string
+		if isDeleted {
+			del = styleAddBtn.Render(" + ")
+		} else {
+			del = styleDeleteBtn.Render(delStr)
+		}
+		var nameLine string
+		switch {
+		case i == a.modsIdx && focused:
+			nameLine = styleModItemSelected.Render(name + pad)
+		case i == a.modsIdx:
+			nameLine = itemSelDim.Render(name + pad)
+		case isDeleted:
+			nameLine = itemDel.Render(name + pad)
+		default:
+			nameLine = itemStyle.Render(name + pad)
+		}
+		rows = append(rows, statusIndicator+nameLine+cardSpace+del)
+	}
+
+	start, end := visibleWindow(a.modsIdx, len(rows), listH)
+	visible := rows[start:end]
+	delX := 2 + statusIndicatorW + 1 + nameW + 1
+	for r := range visible {
+		if start+r < len(a.modsFiltered) {
+			// The − button first (first zone match wins), then the row itself.
+			a.clickZones = append(a.clickZones, clickZone{
+				x: delX, y: paneTop + 4 + r, w: delW, h: 1,
+				action: fmt.Sprintf("del:%d", start+r),
+			})
+			a.clickZones = append(a.clickZones, clickZone{
+				x: 0, y: paneTop + 4 + r, w: totalW, h: 1,
+				action: fmt.Sprintf("home:modrow:%d", start+r),
+			})
+		}
+	}
+	// Pane-wide focus zone last, so the specific zones above win.
+	a.clickZones = append(a.clickZones, clickZone{
+		x: 0, y: paneTop, w: totalW, h: midH, action: "home:focus:mods",
+	})
+
+	lines := append([]string{title, searchRow, ""}, visible...)
+	for len(lines) < midH-2 {
+		lines = append(lines, "")
+	}
+	return card(lines, mw, focused)
+}
+
+// renderAgentPane renders the embedded agent chat pane and registers its
+// click zones (pane occupies x ∈ [paneX, paneX+totalW)).
+func (a *App) renderAgentPane(totalW, midH, paneX, paneTop int) string {
+	aw := totalW - 4 // interior width
+	focused := a.homeFocus == 1 || a.agentFull
+
+	titleStyle := styleCardTitleDim
+	if focused {
+		titleStyle = styleCardTitle
+	}
+	fullBtn := styleCardAccent.Render("⛶")
+	titleTxt := titleStyle.Render("✦ Agent")
+	switch a.agentMode {
+	case 1:
+		titleTxt += styleCardFill.Render(" ") + styleBtnFocused.Render("AUTO")
+	case 2:
+		titleTxt += styleCardFill.Render(" ") +
+			lipgloss.NewStyle().Foreground(colorOnAccent).Background(colorDanger).Bold(true).Padding(0, 1).Render("YOLO")
+	}
+	pad := aw - lipgloss.Width(titleTxt) - lipgloss.Width(fullBtn)
+	if pad < 1 {
+		pad = 1
+	}
+	title := titleTxt + styleCardFill.Render(strings.Repeat(" ", pad)) + fullBtn
+	a.clickZones = append(a.clickZones, clickZone{
+		x: paneX + 2 + aw - lipgloss.Width(fullBtn), y: paneTop + 1,
+		w: lipgloss.Width(fullBtn), h: 1, action: "home:agentfull",
+	})
+
+	// Transcript.
+	errStyle := lipgloss.NewStyle().Foreground(colorDanger).Background(colorBgPanel)
+	var tlines []string
+	for _, e := range a.agentEntries {
+		switch e.role {
+		case "user":
+			// Accent marker, white message text.
+			for li, l := range wrapText(e.text, aw-2) {
+				prefix := styleCardFill.Render("  ")
+				if li == 0 {
+					prefix = styleCardAccent.Render("❯ ")
+				}
+				tlines = append(tlines, prefix+styleCardText.Render(l))
+			}
+		case "error":
+			for _, l := range wrapText("✗ "+e.text, aw) {
+				tlines = append(tlines, errStyle.Render(l))
+			}
+		default:
+			for _, l := range wrapText(e.text, aw) {
+				tlines = append(tlines, styleCardText.Render(l))
+			}
+		}
+		tlines = append(tlines, "")
+	}
+	if a.agentRunning {
+		tlines = append(tlines, styleCardAccent.Render(spinnerFrames[a.spinFrame])+styleCardMuted.Render(" thinking…"))
+	}
+	if len(tlines) == 0 {
+		tlines = []string{styleCardMuted.Render("chat with the agent about this pack — it can run"),
+			styleCardMuted.Render("the tests, fix sources, and edit mods itself")}
+	}
+
+	transH := midH - 4 // borders, title, input row
+	if transH < 1 {
+		transH = 1
+	}
+	if maxScroll := len(tlines) - transH; maxScroll > 0 {
+		if a.agentScroll > maxScroll {
+			a.agentScroll = maxScroll
+		}
+		tlines = tlines[len(tlines)-transH-a.agentScroll : len(tlines)-a.agentScroll]
+	} else {
+		a.agentScroll = 0
+	}
+
+	// Input row.
+	a.agentInput.Width = aw - 4
+	var inputRow string
+	if a.agentRunning {
+		inputRow = styleCardMuted.Render("❯ …")
+	} else {
+		promptStyle := styleCardMuted
+		if focused {
+			promptStyle = styleCardAccent
+		}
+		inputRow = promptStyle.Render("❯ ") + a.agentInput.View()
+	}
+
+	// Pad transcript so the input row sits on the bottom edge.
+	for len(tlines) < transH {
+		tlines = append(tlines, "")
+	}
+
+	a.clickZones = append(a.clickZones, clickZone{
+		x: paneX, y: paneTop, w: totalW, h: midH, action: "home:focus:agent",
+	})
+
+	return card(append(append([]string{title}, tlines...), inputRow), aw, focused)
+}
+
+// renderTestSummary formats a finished test run's stats for the command pane.
+func renderTestSummary(s *testSummary, aw int) []string {
+	danger := lipgloss.NewStyle().Foreground(colorDanger).Bold(true).Background(colorBgPanel)
+	kv := func(key, val string) string {
+		return styleCardMuted.Render(fmt.Sprintf("%-12s", key)) +
+			styleCardText.Render(truncate(val, maxInt(4, aw-12)))
+	}
+
+	var lines []string
+	lines = append(lines, "")
+	if s.passed {
+		lines = append(lines, styleCardAccent.Render("✓ TEST PASSED"))
+	} else {
+		lines = append(lines, danger.Render("✗ TEST FAILED"))
+	}
+	lines = append(lines, "")
+	if s.elapsed != "" {
+		lines = append(lines, kv("elapsed", s.elapsed))
+	}
+	if len(s.tps) > 0 {
+		lines = append(lines, "", styleCardMuted.Render("tps samples"))
+		for _, t := range s.tps {
+			lines = append(lines, styleCardText.Render(truncate("  "+t, aw)))
+		}
+	}
+	if s.shots != "" {
+		lines = append(lines, "")
+		for _, wl := range wrapText(s.shots, aw) {
+			lines = append(lines, styleCardMuted.Render(wl))
+		}
+	}
+	if s.errText != "" {
+		lines = append(lines, "")
+		for _, wl := range wrapText("✗ "+s.errText, aw) {
+			lines = append(lines, danger.Render(wl))
+		}
+	}
+	lines = append(lines, "", styleCardMuted.Render("✕ to close"))
+	return lines
+}
+
+// viewMainMenuList is the narrow-terminal fallback: the original vertical
+// list menu.
+func (a *App) viewMainMenuList() string {
 	a.clickZones = nil
 
 	// Calculate vertical centre offset so we can register click zones.
@@ -212,7 +1111,7 @@ func (a *App) viewManageMods() string {
 	})
 
 	const delStr = " − "
-	delW := len(delStr) // 3 chars, no ANSI
+	delW := lipgloss.Width(delStr) // visual width — the − glyph is 3 bytes
 
 	var rows []string
 	if len(a.modsFiltered) == 0 {
@@ -337,34 +1236,26 @@ func (a *App) renderWithModal(bg, modal string) string {
 		y = 0
 	}
 
-	// Create output lines by overlaying modal on background
+	// Overlay the modal, preserving the background on both sides so it
+	// reads as a popup rather than blanking the whole row.
 	result := make([]string, bgH)
 	for i := 0; i < bgH; i++ {
 		modalLineIdx := i - y
 		if modalLineIdx >= 0 && modalLineIdx < modalH {
-			// This line has modal content
 			bgLine := ""
 			if i < len(bgLines) {
 				bgLine = bgLines[i]
 			}
-
-			// Get background content before and after modal
-			before := strings.Repeat(" ", x)
 			modalLine := modalLines[modalLineIdx]
-			after := ""
 
-			// Preserve background content after the modal
-			bgWidth := lipgloss.Width(bgLine)
-			modalEnd := x + lipgloss.Width(modalLine)
-			if bgWidth > modalEnd {
-				// Extract the part of the background after the modal
-				// This is tricky with ANSI codes, so we'll just pad with spaces
-				after = strings.Repeat(" ", bgWidth-modalEnd)
+			before := ansitruncate.String(bgLine, uint(x))
+			if pad := x - lipgloss.Width(before); pad > 0 {
+				before += strings.Repeat(" ", pad)
 			}
+			after := ansiTail(bgLine, x+lipgloss.Width(modalLine))
 
-			result[i] = before + modalLine + after
+			result[i] = before + "\x1b[0m" + modalLine + "\x1b[0m" + after
 		} else {
-			// No modal content, use background as-is
 			if i < len(bgLines) {
 				result[i] = bgLines[i]
 			} else {

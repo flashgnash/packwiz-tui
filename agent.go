@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -81,11 +82,13 @@ This pack is managed with packwiz-tui, which is on PATH here. Useful commands
 - ` + "`packwiz-tui test server`" + ` — install + boot this pack's server, verify it reaches "Done", sample TPS over RCON. Fails with log paths on crash.
 - ` + "`packwiz-tui test full [--soak 90s]`" + ` — the above plus a real headless client (gamescope + portablemc, offline account) that auto-joins, soaks in spectator, samples TPS, and saves screenshots to ` + "`.packwiz-tui/last-test/`" + ` — read those screenshots to check for visual problems.
 - ` + "`packwiz-tui fix-sources`" + ` — find CurseForge-API-blocked mods (breaks unattended installs) and swap them to byte-identical Modrinth files. Doubles as an install test.
+- ` + "`packwiz-tui convert-sources modrinth|curseforge [slug]`" + ` — convert every mod (or one slug) to the given source: modrinth conversions are byte-identical (sha1); curseforge conversions re-add by slug and roll back on failure.
 - ` + "`packwiz-tui tag-sides <server-pack.zip>`" + ` — set side=client/both on all mods by diffing an official server pack.
 - ` + "`packwiz-tui export prism|prism-preinstalled|mrpack|curseforge|server|all`" + ` — build importable artifacts into ` + "`.packwiz-tui/build/`" + `. The prism zips import into PrismLauncher and self-update from this repo via a packwiz-installer pre-launch hook (preinstalled bundles all mods too).
 - ` + "`packwiz-tui install-prism`" + ` — write the self-updating instance straight into the local PrismLauncher (creates or refreshes; never touches worlds/options). User restarts Prism to see it.
 - ` + "`packwiz-tui server-ip [address]`" + ` — get/set the pack's default server address; when set, prism exports/installs get a prefilled servers.dat (existing installs keep their own server list).
 - ` + "`packwiz-tui nixos-config`" + ` — print a services.minecraft-servers block for the user's nix-minecraft flake, ready to paste into nixos-configuration (glados-style hosting).
+- ` + "`packwiz-tui changelog [--from ref --to ref]`" + ` — markdown changelog between refs (default: previous tag → HEAD): mod adds/removals diffed from git, config/other changes summarised by the configured agent.
 - ` + "`packwiz-tui release [tag]`" + ` — export all + publish a GitHub release with gh (defaults to v<pack version>).
 - ` + "`packwiz-tui init-workflow`" + ` — scaffold a GitHub Actions workflow: every push builds all artifacts (downloadable as workflow artifacts), and a v* tag push publishes them as a release.
 - ` + "`packwiz`" + ` itself (add/remove/update/refresh) is also on PATH.
@@ -184,6 +187,58 @@ func ensureAgentSettings(packDir string) {
 }
 
 type msgAgentDone struct{ err error }
+
+type msgAgentReply struct {
+	text string
+	err  error
+}
+
+// agentChatCmd runs one embedded chat turn headlessly (claude -p style,
+// --continue after the first turn so the conversation keeps its context) and
+// returns the reply as a message for the home screen's chat pane.
+func agentChatCmd(packDir, prompt string, continueSession bool, mode int, mcpConfig string) func() tea.Msg {
+	return func() tea.Msg {
+		cfg := LoadConfig()
+		parts := strings.Fields(cfg.Agent)
+		if _, err := exec.LookPath(parts[0]); err != nil {
+			return msgAgentReply{err: err}
+		}
+		ensureAgentContext(packDir)
+		ensureAgentSettings(packDir)
+		args := append(parts[1:], "-p")
+		if continueSession {
+			args = append(args, "--continue")
+		}
+		// Print mode can't prompt interactively itself — permission requests
+		// route through our MCP bridge, which pops a dialog in the TUI.
+		switch mode {
+		case 1:
+			args = append(args, "--permission-mode", "acceptEdits")
+		case 2:
+			args = append(args, "--dangerously-skip-permissions")
+		}
+		if mode != 2 && mcpConfig != "" {
+			// --mcp-config is variadic — use the = form or it swallows the
+			// positional prompt that follows.
+			args = append(args,
+				"--permission-prompt-tool", "mcp__ptui__approve",
+				"--mcp-config="+mcpConfig)
+		}
+		args = append(args, prompt)
+		c := exec.Command(parts[0], args...)
+		c.Dir = packDir
+		c.Env = agentEnv()
+		out, err := c.CombinedOutput()
+		text := strings.TrimSpace(string(out))
+		if err != nil && text == "" {
+			return msgAgentReply{err: err}
+		}
+		if err != nil {
+			return msgAgentReply{err: fmt.Errorf("%s", text)}
+		}
+		return msgAgentReply{text: text}
+	}
+}
 
 // openAgent suspends the TUI and hands the real terminal to the agent, the
 // same way lazygit is embedded — every agent keybinding works natively

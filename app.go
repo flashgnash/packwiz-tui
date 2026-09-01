@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -21,6 +24,7 @@ const (
 	ScreenLoading Screen = iota
 	ScreenRepoSelect
 	ScreenCloneRepo
+	ScreenCreateRepo
 	ScreenMainMenu
 	ScreenManageMods
 	ScreenManageLoader
@@ -63,6 +67,58 @@ type msgEditorDone struct {
 }
 type msgLazygitDone struct{ err error }
 type msgSelfCmdDone struct{ err error }
+type msgHomeCmdLine struct{ line string }
+type msgHomeCmdExit struct{ err error }
+type msgCmdPaneAutoClose struct{ gen int }
+
+// testSummary holds the stats shown after a test run finishes.
+type testSummary struct {
+	passed  bool
+	errText string
+	elapsed string
+	tps     []string
+	shots   string
+}
+
+// summarizeTest extracts the interesting stats from a test run's output.
+func summarizeTest(lines []string, err error) *testSummary {
+	s := &testSummary{passed: err == nil}
+	if err != nil {
+		s.errText = err.Error()
+	}
+	for _, l := range lines {
+		t := strings.TrimSpace(l)
+		lower := strings.ToLower(t)
+		switch {
+		case strings.HasPrefix(lower, "elapsed:"):
+			s.elapsed = strings.TrimSpace(t[len("elapsed:"):])
+		case strings.Contains(lower, "screenshots in"):
+			s.shots = t
+		case strings.Contains(lower, "tps") && !strings.HasPrefix(lower, "sampling"):
+			if len(s.tps) < 8 {
+				s.tps = append(s.tps, t)
+			}
+		}
+	}
+	return s
+}
+type msgPrismDone struct {
+	out string
+	err error
+}
+type msgClientState struct{ up bool }
+type msgRepoCreated struct{ path string }
+type msgCreateRepoErr struct{ err error }
+type msgPackwizInitDone struct {
+	path string
+	err  error
+}
+
+// agentEntry is one line of the embedded chat transcript.
+type agentEntry struct {
+	role string // "user", "agent", "error"
+	text string
+}
 
 // interactiveCmd holds state for a command waiting on user input.
 type interactiveCmd struct {
@@ -88,6 +144,11 @@ type App struct {
 	// Clone
 	cloneInput textinput.Model
 
+	// Create repo
+	createNameInput textinput.Model
+	createPrivate   bool
+	createError     string
+
 	// Server address prefill
 	serverIPInput textinput.Model
 	serverIPError string
@@ -98,8 +159,76 @@ type App struct {
 	packDir  string
 	packName string
 
-	// Main menu
+	// Main menu (narrow list fallback)
 	menuIdx int
+
+	// Home dashboard (wide layout)
+	homeFocus  int // 0 mods, 1 agent, 2 buttons, 3 IP box, 4 loader box
+	homeBtnIdx   int
+	serverAddr   string
+	packMeta     PackMeta
+	repoRemote   string
+	clientUp     bool // the pack's client is running (polled)
+	clientPollOn bool
+	changedCount int // uncommitted files in the repo (shown on Push & Exit)
+
+	// Streaming command pane (right of the agent chat)
+	cmdRunning bool
+	cmdDone    bool
+	cmdErr     error
+	cmdTitle   string
+	cmdLines   []string
+	cmdProc    *exec.Cmd
+	cmdCh      chan tea.Msg
+	cmdIsTest  bool         // tests end on a stats summary instead of closing
+	cmdGen     int          // invalidates stale auto-close timers
+	cmdCloseAt time.Time    // when a finished non-test pane auto-closes
+	cmdSummary *testSummary // post-run stats for tests
+
+	// Info popup (over the home screen)
+	infoTitle string
+	infoText  string
+	infoErr   bool
+
+	// Mod detail pane (left of the agent chat). Unpinned panes follow the
+	// mod list selection and close when focus leaves the list; pinned panes
+	// (opened with enter / focused directly) stay until closed manually.
+	modDetail    *ModDetail
+	detailPinned bool
+	// Session caches so switching between mods doesn't hammer the APIs:
+	// version lists by source:projectID, resolved numbers by file sha1.
+	modVerCache map[string]cachedVersions
+	modHashVer  map[string]string
+
+	// Discard confirmation popup
+	confirmDiscard bool
+
+	// Sources popup
+	sourcesModal bool
+	sourcesSel   int // 0 = convert to curseforge, 1 = convert to modrinth
+	sourceCounts SourceCounts
+
+	// Embedded agent chat
+	agentInput   textinput.Model
+	agentEntries []agentEntry
+	agentRunning bool
+	agentStarted bool // a session exists → use --continue
+	agentFull    bool
+	// Headless -p turns can't show interactive permission prompts, so the
+	// mode picks how much is pre-approved: 0 default (unapproved tools
+	// fail), 1 AUTO (accept edits), 2 YOLO (skip all permission checks).
+	agentMode int
+
+	// Permission-prompt bridge (see approve.go)
+	approveLn      net.Listener
+	approveCh      chan *approveReq
+	approvePending *approveReq
+	mcpConfigPath  string
+	// True while agent focus was gained by tab-cycling and nothing else has
+	// happened yet — shift+tab keeps cycling instead of toggling auto, so
+	// spamming shift+tab travels through the pane.
+	agentFocusByCycle bool
+	agentScroll  int  // lines scrolled up from the transcript bottom
 
 	// Mods management
 	mods            []ModFile
@@ -159,18 +288,35 @@ func NewApp() *App {
 	addMod.CharLimit = 128
 	addMod.Width = 40
 
+	createName := textinput.New()
+	createName.Placeholder = "my-modpack"
+	createName.CharLimit = 100
+	createName.Width = 40
+
 	serverIP := textinput.New()
 	serverIP.Placeholder = "play.example.com or 1.2.3.4:25565"
 	serverIP.CharLimit = 256
 	serverIP.Width = 50
 
+	agentIn := textinput.New()
+	agentIn.Placeholder = "ask the agent about this pack…"
+	agentIn.CharLimit = 2048
+	agentIn.Width = 40
+	// The pane renders its own "❯ " prefix; the default "> " prompt would
+	// double up and overflow the row.
+	agentIn.Prompt = ""
+
 	return &App{
 		screen:       ScreenLoading,
 		loadingMsg:   "Detecting git repository…",
 		cloneInput:    clone,
+		createNameInput: createName,
+		createPrivate:   true,
 		searchInput:   search,
 		addModInput:   addMod,
 		serverIPInput: serverIP,
+		agentInput:    agentIn,
+		homeFocus:     2,
 		modsDeleted:  make(map[string]bool),
 		modsModified: make(map[string]bool),
 	}
@@ -257,6 +403,53 @@ func (a *App) cloneRepo(url string) tea.Cmd {
 		})
 		return msgPackFound{packDir: packDir, packName: name, repoRoot: target}
 	}
+}
+
+// createRepo creates a new GitHub repository via gh and clones it into
+// ~/modpacks/<name>.
+func (a *App) createRepo(name string, private bool) tea.Cmd {
+	return func() tea.Msg {
+		if _, err := exec.LookPath("gh"); err != nil {
+			return msgCreateRepoErr{err: fmt.Errorf("gh CLI not found (install from https://cli.github.com)")}
+		}
+		if _, err := exec.Command("gh", "auth", "status").CombinedOutput(); err != nil {
+			return msgCreateRepoErr{err: fmt.Errorf("gh is not authenticated (run 'gh auth login')")}
+		}
+		home, _ := os.UserHomeDir()
+		parent := filepath.Join(home, "modpacks")
+		if err := os.MkdirAll(parent, 0o755); err != nil {
+			return msgCreateRepoErr{err: err}
+		}
+		target := filepath.Join(parent, name)
+		if _, err := os.Stat(target); err == nil {
+			return msgCreateRepoErr{err: fmt.Errorf("%s already exists", target)}
+		}
+		visibility := "--public"
+		if private {
+			visibility = "--private"
+		}
+		c := exec.Command("gh", "repo", "create", name, visibility, "--clone")
+		c.Dir = parent
+		out, err := c.CombinedOutput()
+		if err != nil {
+			msg := strings.TrimSpace(string(out))
+			if msg == "" {
+				msg = err.Error()
+			}
+			return msgCreateRepoErr{err: fmt.Errorf("gh repo create failed: %s", msg)}
+		}
+		return msgRepoCreated{path: target}
+	}
+}
+
+// initPack runs `packwiz init` interactively in the real terminal so the user
+// can answer its prompts (mc version, loader, etc.).
+func (a *App) initPack(path string) tea.Cmd {
+	c := exec.Command("packwiz", "init")
+	c.Dir = path
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		return msgPackwizInitDone{path: path, err: err}
+	})
 }
 
 func (a *App) loadMods() tea.Cmd {
@@ -434,6 +627,26 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m := msg.(type) {
 
 	case tea.MouseMsg:
+		// Scroll wheel over the mod list moves the selection.
+		if m.Button == tea.MouseButtonWheelUp || m.Button == tea.MouseButtonWheelDown {
+			for _, z := range a.clickZones {
+				if m.X >= z.x && m.X < z.x+z.w && m.Y >= z.y && m.Y < z.y+z.h &&
+					(z.action == "home:focus:mods" || strings.HasPrefix(z.action, "home:modrow:") || strings.HasPrefix(z.action, "del:")) {
+					delta := 3
+					if m.Button == tea.MouseButtonWheelUp {
+						delta = -3
+					}
+					if len(a.modsFiltered) > 0 {
+						a.modsIdx = clamp(a.modsIdx+delta, 0, len(a.modsFiltered)-1)
+						if a.modDetail != nil {
+							return a, a.syncModDetail(a.modsFiltered[a.modsIdx])
+						}
+					}
+					return a, nil
+				}
+			}
+			return a, nil
+		}
 		if m.Action == tea.MouseActionRelease && m.Button == tea.MouseButtonLeft {
 			for _, z := range a.clickZones {
 				if m.X >= z.x && m.X < z.x+z.w && m.Y >= z.y && m.Y < z.y+z.h {
@@ -460,6 +673,106 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							fmt.Sscanf(z.action, "menu:%d", &idx)
 							a.menuIdx = idx
 							return a.activateMenuItem()
+						} else if strings.HasPrefix(z.action, "home:btn:") {
+							var idx int
+							fmt.Sscanf(z.action, "home:btn:%d", &idx)
+							if idx < len(homeButtons) {
+								a.setHomeFocus(2)
+								a.homeBtnIdx = idx
+								return a.homeActivate(homeButtons[idx].action)
+							}
+						} else if z.action == "repo:clone" {
+							a.repoListIdx = len(a.repoList)
+							a.screen = ScreenCloneRepo
+							a.cloneInput.Focus()
+							return a, textinput.Blink
+						} else if z.action == "repo:create" {
+							a.repoListIdx = len(a.repoList) + 1
+							a.screen = ScreenCreateRepo
+							a.createError = ""
+							a.createNameInput.Focus()
+							return a, textinput.Blink
+						} else if strings.HasPrefix(z.action, "repo:") {
+							var idx int
+							fmt.Sscanf(z.action, "repo:%d", &idx)
+							if idx < len(a.repoList) {
+								a.repoListIdx = idx
+								a.loadingMsg = "Loading pack…"
+								a.screen = ScreenLoading
+								return a, a.loadPackFromRepo(a.repoList[idx])
+							}
+						} else if strings.HasPrefix(z.action, "home:modrow:") {
+							var idx int
+							fmt.Sscanf(z.action, "home:modrow:%d", &idx)
+							if idx < len(a.modsFiltered) {
+								a.modsIdx = idx
+								return a, a.openModDetail(a.modsFiltered[idx])
+							}
+							return a, nil
+						} else if strings.HasPrefix(z.action, "home:mdetail:") {
+							return a.modDetailClick(z.action)
+						} else if z.action == "home:srcconv:cf" {
+							a.sourcesModal = false
+							return a, a.startHomeCommand("⇄ Convert to CurseForge", "convert-sources", "curseforge")
+						} else if z.action == "home:srcconv:mr" {
+							a.sourcesModal = false
+							return a, a.startHomeCommand("⇄ Convert to Modrinth", "convert-sources", "modrinth")
+						} else if z.action == "approve:allow" {
+							return a, a.resolveApprove(true, false)
+						} else if z.action == "approve:always" {
+							return a, a.resolveApprove(true, true)
+						} else if z.action == "approve:deny" {
+							return a, a.resolveApprove(false, false)
+						} else if z.action == "home:discardcancel" {
+							a.confirmDiscard = false
+							return a, nil
+						} else if z.action == "home:srcdismiss" {
+							a.sourcesModal = false
+							return a, nil
+						} else if z.action == "home:modaldismiss" {
+							a.infoTitle = ""
+							return a, nil
+						} else if z.action == "home:cmdclose" {
+							if a.cmdRunning && a.cmdProc != nil && a.cmdProc.Process != nil {
+								syscall.Kill(-a.cmdProc.Process.Pid, syscall.SIGTERM)
+							} else {
+								a.cmdGen++ // cancel any pending auto-close
+								a.cmdDone = false
+								a.cmdTitle = ""
+								a.cmdLines = nil
+								a.cmdErr = nil
+								a.cmdSummary = nil
+								a.cmdCloseAt = time.Time{}
+							}
+							return a, nil
+						} else if z.action == "home:repourl" {
+							if url := repoWebURL(a.repoRemote); url != "" {
+								go exec.Command("xdg-open", url).Start()
+								a.statusMsg = "Opening " + url
+								a.statusIsErr = false
+								a.statusExpire = time.Now().Add(2 * time.Second)
+								return a, a.expireStatus()
+							}
+							return a, nil
+						} else if z.action == "home:loaderbox" {
+							a.setHomeFocus(4)
+							a.screen = ScreenManageLoader
+							return a, nil
+						} else if z.action == "home:editaddr" {
+							a.serverIPInput.SetValue(ReadServerAddress(a.packDir))
+							a.serverIPInput.Focus()
+							a.screen = ScreenServerIP
+							return a, textinput.Blink
+						} else if z.action == "home:agentfull" {
+							a.agentFull = !a.agentFull
+							a.setHomeFocus(1)
+							return a, textinput.Blink
+						} else if z.action == "home:focus:mods" {
+							return a, a.focusHome(0)
+						} else if z.action == "home:focus:agent" {
+							cmd := a.focusHome(1)
+							a.agentFocusByCycle = false
+							return a, tea.Batch(cmd, textinput.Blink)
 						}
 					}
 				}
@@ -491,9 +804,21 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.packDir = m.packDir
 		a.packName = m.packName
 		a.repoRoot = m.repoRoot
+		a.serverAddr = ReadServerAddress(m.packDir)
+		a.packMeta, _ = ParsePackMeta(m.packDir)
+		a.repoRemote = GetGitRemote(m.repoRoot)
 		a.screen = ScreenMainMenu
 		a.menuIdx = 0
-		return a, nil
+		a.homeFocus = 0 // start on the mod list
+		a.homeBtnIdx = 0
+		// Load mods in the background for the home screen's embedded pane,
+		// and start polling for a running client (Stop Client button).
+		cmds := []tea.Cmd{a.loadMods()}
+		if !a.clientPollOn {
+			a.clientPollOn = true
+			cmds = append(cmds, a.pollClient())
+		}
+		return a, tea.Batch(cmds...)
 
 	case msgPackError:
 		a.statusMsg = "Error: " + m.err.Error()
@@ -507,8 +832,30 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.modsModified = m.modified
 		a.modsAdded = m.added
 		a.modsDeleted = m.deleted
+		a.changedCount = len(m.modified) + len(m.added) + len(m.deleted)
 		a.filterMods()
-		a.screen = ScreenManageMods
+		// Close the detail pane if its mod's metafile is gone.
+		if a.modDetail != nil {
+			if _, err := os.Stat(a.modDetail.TomlPath); err != nil {
+				a.modDetail = nil
+				a.detailPinned = false
+				if a.homeFocus == 5 {
+					a.setHomeFocus(0)
+				}
+			}
+		}
+		// Auto-open the detail pane for the selection when the list has
+		// focus (covers startup and reloads).
+		if a.screen == ScreenMainMenu && a.wideHome() && a.homeFocus == 0 &&
+			a.modDetail == nil && len(a.modsFiltered) > 0 && a.modsIdx < len(a.modsFiltered) {
+			a.detailPinned = false
+			return a, a.syncModDetail(a.modsFiltered[a.modsIdx])
+		}
+		// A refresh triggered from the home screen stays there; the dedicated
+		// manage-mods screen is only entered from a loading transition.
+		if a.screen != ScreenMainMenu {
+			a.screen = ScreenManageMods
+		}
 		// Reopen add modal if we came from adding a mod
 		if a.returnToAddModal {
 			a.returnToAddModal = false
@@ -531,6 +878,193 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.outputDone = true
 		return a, nil
 
+	case msgModVersions:
+		if a.modVerCache == nil {
+			a.modVerCache = map[string]cachedVersions{}
+		}
+		errStr := ""
+		if m.err != nil {
+			errStr = m.err.Error()
+		}
+		a.modVerCache[m.key] = cachedVersions{vers: m.vers, err: errStr, at: time.Now()}
+		if a.modDetail != nil && a.modDetail.Slug == m.slug {
+			a.modDetail.Versions = m.vers
+			if m.err != nil {
+				a.modDetail.VersionsErr = m.err.Error()
+			}
+			for _, v := range m.vers {
+				if v.ID == a.modDetail.VersionID {
+					a.modDetail.CurVersion = v.Number
+				}
+			}
+		}
+		return a, nil
+
+	case msgModConvertDone:
+		d := a.modDetail
+		if d == nil || d.Slug != m.slug {
+			return a, a.loadMods()
+		}
+		d.Converting = false
+		// The re-added metafile may carry the target source's slug.
+		if _, err := os.Stat(d.TomlPath); err != nil {
+			if p, ferr := findTomlByFilename(a.packDir, d.Filename); ferr == nil {
+				d.TomlPath = p
+				d.Slug = strings.TrimSuffix(strings.TrimSuffix(filepath.Base(p), ".toml"), ".pw")
+			}
+		}
+		oldSource := d.Source
+		loadModDetailFields(d)
+		switch {
+		case m.err != nil:
+			d.ConvertErr = m.err.Error()
+		case d.Source == oldSource:
+			d.ConvertErr = convertFailLine(m.report)
+		default:
+			d.Versions, d.VersionsErr, d.CurVersion = nil, "", ""
+			a.statusMsg = "Converted to " + d.Source
+			a.statusIsErr = false
+			a.statusExpire = time.Now().Add(3 * time.Second)
+			return a, tea.Batch(a.expireStatus(), a.loadMods(), a.modDetailFetches())
+		}
+		return a, a.loadMods()
+
+	case msgModDetailFetch:
+		// Debounced scroll-sync: only fetch if this mod is still the one shown.
+		if a.modDetail != nil && a.modDetail.Slug == m.slug && len(a.modDetail.Versions) == 0 {
+			return a, a.modDetailFetches()
+		}
+		return a, nil
+
+	case msgModCurVer:
+		if m.number != "" && m.sha1 != "" {
+			if a.modHashVer == nil {
+				a.modHashVer = map[string]string{}
+			}
+			a.modHashVer[m.sha1] = m.number
+		}
+		if a.modDetail != nil && a.modDetail.Slug == m.slug &&
+			m.number != "" && a.modDetail.CurVersion == "" {
+			a.modDetail.CurVersion = m.number
+		}
+		return a, nil
+
+	case msgModDetailDone:
+		if m.err != nil {
+			a.statusMsg = ""
+			a.showInfo("Version change failed", m.err.Error(), true)
+			return a, nil
+		}
+		a.statusMsg = "Version changed"
+		a.statusIsErr = false
+		a.statusExpire = time.Now().Add(3 * time.Second)
+		if a.modDetail != nil {
+			a.modDetail.TomlPath = filepath.Join(a.packDir, "mods", a.modDetail.Slug+".pw.toml")
+			loadModDetailFields(a.modDetail)
+		}
+		return a, tea.Batch(a.expireStatus(), a.loadMods())
+
+	case msgClientState:
+		a.clientUp = m.up
+		return a, a.pollClient()
+
+	case msgHomeCmdLine:
+		a.cmdLines = append(a.cmdLines, m.line)
+		if len(a.cmdLines) > 2000 {
+			a.cmdLines = a.cmdLines[len(a.cmdLines)-2000:]
+		}
+		return a, a.waitHomeCmd()
+
+	case msgHomeCmdExit:
+		a.cmdRunning = false
+		a.cmdDone = true
+		a.cmdErr = m.err
+		a.cmdProc = nil
+		var cmds []tea.Cmd
+		if a.cmdIsTest {
+			// Tests end on a stats summary and stay up until closed.
+			a.cmdSummary = summarizeTest(a.cmdLines, m.err)
+		} else {
+			// Everything else auto-closes shortly after finishing.
+			a.cmdCloseAt = time.Now().Add(10 * time.Second)
+			gen := a.cmdGen
+			cmds = append(cmds, tea.Tick(10*time.Second, func(time.Time) tea.Msg {
+				return msgCmdPaneAutoClose{gen: gen}
+			}))
+		}
+		// Refresh the mod list / change count — fixers may have edited files.
+		if a.screen == ScreenMainMenu {
+			cmds = append(cmds, a.loadMods())
+		}
+		return a, tea.Batch(cmds...)
+
+	case msgCmdPaneAutoClose:
+		if m.gen == a.cmdGen && a.cmdDone && !a.cmdRunning {
+			a.cmdDone = false
+			a.cmdTitle = ""
+			a.cmdLines = nil
+			a.cmdErr = nil
+			a.cmdSummary = nil
+			a.cmdCloseAt = time.Time{}
+		}
+		return a, nil
+
+	case msgPrismDone:
+		a.statusMsg = ""
+		if m.err != nil {
+			text := m.err.Error()
+			if tailOut := strings.TrimSpace(m.out); tailOut != "" {
+				text = tail(tailOut, 6) + "\n" + text
+			}
+			a.showInfo("Prism install failed", text, true)
+		} else {
+			a.showInfo("Added to Prism", "The instance is installed. Restart PrismLauncher to see it.", false)
+		}
+		return a, nil
+
+	case msgApproveReq:
+		a.approvePending = m.req
+		return a, nil
+
+	case msgAgentReply:
+		a.agentRunning = false
+		a.agentScroll = 0
+		if m.err != nil {
+			a.agentEntries = append(a.agentEntries, agentEntry{role: "error", text: m.err.Error()})
+		} else {
+			a.agentStarted = true
+			a.agentEntries = append(a.agentEntries, agentEntry{role: "agent", text: m.text})
+		}
+		return a, nil
+
+	case msgRepoCreated:
+		return a, a.initPack(m.path)
+
+	case msgCreateRepoErr:
+		a.createError = m.err.Error()
+		a.screen = ScreenCreateRepo
+		a.createNameInput.Focus()
+		return a, textinput.Blink
+
+	case msgPackwizInitDone:
+		// Same mouse-restore workaround as lazygit/editor.
+		restoreMouse := func() tea.Msg {
+			fmt.Print("\033[?1000h")
+			fmt.Print("\033[?1002h")
+			fmt.Print("\033[?1006h")
+			return tea.WindowSizeMsg{Width: a.width, Height: a.height}
+		}
+		if m.err != nil {
+			a.statusMsg = "packwiz init failed: " + m.err.Error()
+			a.statusIsErr = true
+			a.statusExpire = time.Now().Add(4 * time.Second)
+			a.screen = ScreenRepoSelect
+			return a, tea.Batch(restoreMouse, a.expireStatus())
+		}
+		a.loadingMsg = "Loading pack…"
+		a.screen = ScreenLoading
+		return a, tea.Batch(restoreMouse, a.loadPackFromRepo(RepoEntry{Path: m.path}))
+
 	case msgInteractivePrompt:
 		a.interactivePrompt = m.prompt
 		a.interactiveOptions = m.options
@@ -551,7 +1085,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		restoreMouse := func() tea.Msg {
 			// Send ANSI escape codes to re-enable mouse tracking
 			fmt.Print("\033[?1000h")  // Enable mouse button tracking
-			fmt.Print("\033[?1003h")  // Enable all mouse motion tracking
+			fmt.Print("\033[?1002h")  // Enable cell (button) motion tracking
 			fmt.Print("\033[?1006h")  // Enable SGR extended mouse mode
 			return tea.WindowSizeMsg{Width: a.width, Height: a.height}
 		}
@@ -591,7 +1125,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Manually re-enable mouse mode after lazygit
 		restoreMouse := func() tea.Msg {
 			fmt.Print("\033[?1000h")
-			fmt.Print("\033[?1003h")
+			fmt.Print("\033[?1002h")
 			fmt.Print("\033[?1006h")
 			return tea.WindowSizeMsg{Width: a.width, Height: a.height}
 		}
@@ -613,7 +1147,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Same mouse-restore workaround as lazygit/editor.
 		restoreMouse := func() tea.Msg {
 			fmt.Print("\033[?1000h")
-			fmt.Print("\033[?1003h")
+			fmt.Print("\033[?1002h")
 			fmt.Print("\033[?1006h")
 			return tea.WindowSizeMsg{Width: a.width, Height: a.height}
 		}
@@ -633,12 +1167,19 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, restoreMouse
 	}
 
+	// Global shortcut: ctrl+g opens lazygit from anywhere once a pack is open.
+	if m, ok := msg.(tea.KeyMsg); ok && m.String() == "ctrl+g" && a.repoRoot != "" {
+		return a, a.openLazygit()
+	}
+
 	// Delegate to the active screen.
 	switch a.screen {
 	case ScreenRepoSelect:
 		return a.updateRepoSelect(msg)
 	case ScreenCloneRepo:
 		return a.updateCloneRepo(msg)
+	case ScreenCreateRepo:
+		return a.updateCreateRepo(msg)
 	case ScreenMainMenu:
 		return a.updateMainMenu(msg)
 	case ScreenServerIP:
@@ -662,7 +1203,7 @@ func (a *App) updateRepoSelect(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return a, nil
 	}
-	total := len(a.repoList) + 1 // +1 for "clone new"
+	total := len(a.repoList) + 2 // +2 for "clone new" and "create new"
 	switch m.String() {
 	case "ctrl+c", "q":
 		return a, tea.Quit
@@ -670,10 +1211,24 @@ func (a *App) updateRepoSelect(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.repoListIdx = (a.repoListIdx - 1 + total) % total
 	case "down", "j":
 		a.repoListIdx = (a.repoListIdx + 1) % total
+	case "left", "h":
+		if a.repoListIdx == len(a.repoList)+1 {
+			a.repoListIdx--
+		}
+	case "right", "l":
+		if a.repoListIdx == len(a.repoList) {
+			a.repoListIdx++
+		}
 	case "enter", " ":
 		if a.repoListIdx == len(a.repoList) {
 			a.screen = ScreenCloneRepo
 			a.cloneInput.Focus()
+			return a, textinput.Blink
+		}
+		if a.repoListIdx == len(a.repoList)+1 {
+			a.screen = ScreenCreateRepo
+			a.createError = ""
+			a.createNameInput.Focus()
 			return a, textinput.Blink
 		}
 		repo := a.repoList[a.repoListIdx]
@@ -710,6 +1265,41 @@ func (a *App) updateCloneRepo(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return a, cmd
 }
 
+func (a *App) updateCreateRepo(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m, ok := msg.(tea.KeyMsg); ok {
+		switch m.String() {
+		case "ctrl+c":
+			return a, tea.Quit
+		case "esc":
+			a.screen = ScreenRepoSelect
+			a.createError = ""
+			a.createNameInput.Blur()
+			return a, nil
+		case "tab", "shift+tab":
+			a.createPrivate = !a.createPrivate
+			return a, nil
+		case "enter":
+			name := strings.TrimSpace(a.createNameInput.Value())
+			if name == "" {
+				a.createError = "Please enter a repository name"
+				return a, nil
+			}
+			if strings.ContainsAny(name, "/\\ ") {
+				a.createError = "Name cannot contain spaces or slashes"
+				return a, nil
+			}
+			a.createError = ""
+			a.createNameInput.Blur()
+			a.loadingMsg = "Creating repository…"
+			a.screen = ScreenLoading
+			return a, a.createRepo(name, a.createPrivate)
+		}
+	}
+	var cmd tea.Cmd
+	a.createNameInput, cmd = a.createNameInput.Update(msg)
+	return a, cmd
+}
+
 var mainMenuItems = []struct{ icon, label string }{
 	{"◈", "Manage Mods"},
 	{"⚙", "Manage Loader"},
@@ -723,7 +1313,537 @@ var mainMenuItems = []struct{ icon, label string }{
 	{"✕", "Exit without Pushing"},
 }
 
+// homeButtons are the action chips on the wide home dashboard. The mods list
+// and agent chat live in their own panes, so they aren't buttons here.
+var homeButtons = []struct{ icon, label, action string }{
+	{"▷", "Launch Client", "launch"},
+	{"▶", "Test Server", "testserver"},
+	{"◉", "Test Both", "testfull"},
+	{"⇩", "Install to Prism", "prism"},
+	{"⇄", "Sources", "sources"},
+	{"↑", "Push", "push"},
+	{"⟲", "Discard", "discard"},
+	{"✕", "Exit", "exit"},
+}
+
+// homeBtnRightStart is the index from which buttons are right-aligned in the
+// action row (push / discard / exit).
+const homeBtnRightStart = 5
+
+// homeBtnPlain is a button's unstyled label text (used for width math and
+// styling alike). Push & Exit carries the uncommitted-change count.
+func (a *App) homeBtnPlain(i int) string {
+	b := homeButtons[i]
+	if b.action == "launch" && a.clientUp {
+		return "■ Stop Client"
+	}
+	label := b.icon + " " + b.label
+	if b.action == "push" && a.changedCount > 0 {
+		label += fmt.Sprintf(" (%d)", a.changedCount)
+	}
+	return label
+}
+
+// pollClient checks every few seconds whether the pack's client is running.
+func (a *App) pollClient() tea.Cmd {
+	packDir, meta := a.packDir, a.packMeta
+	return tea.Tick(3*time.Second, func(time.Time) tea.Msg {
+		return msgClientState{up: clientProcRunning(packDir, meta)}
+	})
+}
+
+// wideHome reports whether there is room for the full dashboard; below this
+// the home screen falls back to the vertical list menu (mobile aspect ratio).
+func (a *App) wideHome() bool {
+	return a.width >= 96 && a.height >= 24
+}
+
+// setHomeFocus moves keyboard focus between the home panes, keeping the text
+// inputs' focus state in sync. Prefer focusHome, which also handles the
+// detail pane's auto-open/close behaviour.
+func (a *App) setHomeFocus(n int) {
+	a.homeFocus = n
+	if n == 1 {
+		a.agentInput.Focus()
+	} else {
+		a.agentInput.Blur()
+	}
+	if n != 0 {
+		a.searchFocus = false
+		a.searchInput.Blur()
+	}
+}
+
+// focusHome moves focus with the detail-pane rules: focusing the pane pins
+// it, leaving the mod list closes an unpinned pane, and entering the mod
+// list auto-opens one for the current selection.
+func (a *App) focusHome(n int) tea.Cmd {
+	prev := a.homeFocus
+	if n == 5 && a.modDetail != nil {
+		a.detailPinned = true
+	}
+	if prev == 0 && n != 0 && n != 5 && a.modDetail != nil && !a.detailPinned {
+		a.modDetail = nil
+	}
+	a.setHomeFocus(n)
+	if n == 0 && a.modDetail == nil && len(a.modsFiltered) > 0 && a.modsIdx < len(a.modsFiltered) {
+		a.detailPinned = false
+		return a.syncModDetail(a.modsFiltered[a.modsIdx])
+	}
+	return nil
+}
+
+// cycleHomeFocus tabs through the panes in reading order — left-right,
+// top-bottom: IP, loader, mods, detail (when open), agent, buttons.
+func (a *App) cycleHomeFocus(dir int) tea.Cmd {
+	order := []int{3, 4, 0}
+	if a.modDetail != nil {
+		order = append(order, 5)
+	}
+	order = append(order, 1, 2)
+	cur := 0
+	for i, v := range order {
+		if v == a.homeFocus {
+			cur = i
+		}
+	}
+	return a.focusHome(order[(cur+dir+len(order))%len(order)])
+}
+
 func (a *App) updateMainMenu(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if !a.wideHome() {
+		return a.updateMainMenuList(msg)
+	}
+	if a.addModModal {
+		return a.updateAddModModal(msg)
+	}
+	// A pending permission request blocks everything until answered.
+	if a.approvePending != nil {
+		if m, ok := msg.(tea.KeyMsg); ok {
+			switch m.String() {
+			case "ctrl+c":
+				return a, tea.Quit
+			case "y", "enter":
+				return a, a.resolveApprove(true, false)
+			case "w":
+				return a, a.resolveApprove(true, true)
+			case "n", "d", "esc":
+				return a, a.resolveApprove(false, false)
+			}
+		}
+		return a, nil
+	}
+	// Discard confirmation captures input until answered.
+	if a.confirmDiscard {
+		if m, ok := msg.(tea.KeyMsg); ok {
+			switch m.String() {
+			case "ctrl+c":
+				return a, tea.Quit
+			case "enter", "y":
+				a.confirmDiscard = false
+				a.startOutput()
+				return a, a.discardChanges()
+			case "esc", "q", "n":
+				a.confirmDiscard = false
+			}
+		}
+		return a, nil
+	}
+	// Sources popup captures input until dismissed.
+	if a.sourcesModal {
+		if m, ok := msg.(tea.KeyMsg); ok {
+			switch m.String() {
+			case "ctrl+c":
+				return a, tea.Quit
+			case "esc", "q":
+				a.sourcesModal = false
+			case "left", "h", "right", "l", "tab":
+				a.sourcesSel = 1 - a.sourcesSel
+			case "enter", " ":
+				a.sourcesModal = false
+				if a.sourcesSel == 0 {
+					return a, a.startHomeCommand("⇄ Convert to CurseForge", "convert-sources", "curseforge")
+				}
+				return a, a.startHomeCommand("⇄ Convert to Modrinth", "convert-sources", "modrinth")
+			}
+		}
+		return a, nil
+	}
+	// Info popup captures input until dismissed.
+	if a.infoTitle != "" {
+		if m, ok := msg.(tea.KeyMsg); ok {
+			switch m.String() {
+			case "ctrl+c":
+				return a, tea.Quit
+			case "esc", "enter", " ", "q":
+				a.infoTitle = ""
+			}
+		}
+		return a, nil
+	}
+	if m, ok := msg.(tea.KeyMsg); ok {
+		if m.String() == "ctrl+c" {
+			return a, tea.Quit
+		}
+		if a.agentFull {
+			return a.updateHomeAgent(m)
+		}
+		switch m.String() {
+		case "tab":
+			cmd := a.cycleHomeFocus(1)
+			a.agentFocusByCycle = a.homeFocus == 1
+			return a, tea.Batch(cmd, textinput.Blink)
+		case "shift+tab":
+			// The agent pane claims shift+tab for its auto-mode toggle
+			// (mirroring interactive claude) — but only once the user has
+			// actually interacted with the pane, so cycling straight through
+			// with repeated shift+tabs still works.
+			if a.homeFocus == 1 && !a.agentFocusByCycle {
+				return a.updateHomeAgent(m)
+			}
+			cmd := a.cycleHomeFocus(-1)
+			a.agentFocusByCycle = a.homeFocus == 1
+			return a, tea.Batch(cmd, textinput.Blink)
+		}
+		switch a.homeFocus {
+		case 0:
+			return a.updateHomeMods(m)
+		case 1:
+			return a.updateHomeAgent(m)
+		case 3, 4:
+			return a.updateHomeHeaderBox(m)
+		case 5:
+			return a.updateModDetail(m)
+		default:
+			return a.updateHomeActions(m)
+		}
+	}
+	// Non-key messages (cursor blink etc.) go to whichever input is focused.
+	var cmd tea.Cmd
+	if a.homeFocus == 1 {
+		a.agentInput, cmd = a.agentInput.Update(msg)
+	} else if a.homeFocus == 0 && a.searchFocus {
+		a.searchInput, cmd = a.searchInput.Update(msg)
+	}
+	return a, cmd
+}
+
+// updateHomeMods handles keys while the embedded mods pane is focused —
+// the same bindings as the dedicated manage-mods screen.
+func (a *App) updateHomeMods(m tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.String() {
+	case "esc":
+		if a.searchFocus {
+			if a.searchInput.Value() == "" {
+				a.searchFocus = false
+				a.searchInput.Blur()
+			}
+		} else {
+			return a, a.focusHome(2)
+		}
+	case "right", "l":
+		if !a.searchFocus {
+			if a.modDetail != nil {
+				return a, a.focusHome(5)
+			}
+			return a, a.focusHome(1)
+		}
+	case "/":
+		if !a.searchFocus {
+			a.searchFocus = true
+			a.searchInput.Focus()
+			return a, textinput.Blink
+		}
+	case "n":
+		if !a.searchFocus {
+			a.addModModal = true
+			a.addModInput.Focus()
+			return a, textinput.Blink
+		}
+	case "up", "k":
+		if !a.searchFocus && a.modsIdx > 0 {
+			a.modsIdx--
+			if a.modDetail != nil {
+				return a, a.syncModDetail(a.modsFiltered[a.modsIdx])
+			}
+		}
+	case "down", "j":
+		if !a.searchFocus && a.modsIdx < len(a.modsFiltered)-1 {
+			a.modsIdx++
+			if a.modDetail != nil {
+				return a, a.syncModDetail(a.modsFiltered[a.modsIdx])
+			}
+		}
+	case "enter":
+		if a.searchFocus {
+			a.searchFocus = false
+			a.searchInput.Blur()
+		} else if len(a.modsFiltered) > 0 && a.modsIdx < len(a.modsFiltered) {
+			return a, a.openModDetail(a.modsFiltered[a.modsIdx])
+		}
+	case "e":
+		if !a.searchFocus && len(a.modsFiltered) > 0 && a.modsIdx < len(a.modsFiltered) {
+			return a, a.openInEditor(a.modsFiltered[a.modsIdx].Path)
+		}
+	case "r":
+		if !a.searchFocus {
+			return a, a.loadMods()
+		}
+	case "g":
+		if !a.searchFocus {
+			return a, a.openLazygit()
+		}
+	case "d":
+		if !a.searchFocus {
+			return a.deleteMod()
+		}
+	// Detail-pane hotkeys also work from the list while the pane is open.
+	case "s":
+		if !a.searchFocus && a.modDetail != nil {
+			return a.applyModSide(stepSide(a.modDetail.Side, 1))
+		}
+	case "o":
+		if !a.searchFocus && a.modDetail != nil {
+			return a.applyModOptional(!a.modDetail.Optional)
+		}
+	case "v":
+		if !a.searchFocus && a.modDetail != nil {
+			a.setHomeFocus(5)
+			a.modDetail.ctlIdx = mdCtlVersion
+			return a.activateModDetailCtl(mdCtlVersion)
+		}
+	}
+	if a.searchFocus {
+		prev := a.searchInput.Value()
+		var cmd tea.Cmd
+		a.searchInput, cmd = a.searchInput.Update(m)
+		if a.searchInput.Value() != prev {
+			a.filterMods()
+			a.modsIdx = 0
+		}
+		return a, cmd
+	}
+	return a, nil
+}
+
+// updateHomeAgent handles keys while the embedded agent chat is focused.
+func (a *App) updateHomeAgent(m tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Any real interaction ends tab-traversal mode (see agentFocusByCycle).
+	a.agentFocusByCycle = false
+	switch m.String() {
+	case "esc":
+		if a.agentFull {
+			a.agentFull = false
+			return a, nil
+		}
+		return a, a.focusHome(2)
+	case "ctrl+f":
+		a.agentFull = !a.agentFull
+		return a, nil
+	case "shift+tab":
+		a.agentMode = (a.agentMode + 1) % 3
+		return a, nil
+	case "pgup":
+		a.agentScroll += 5
+		return a, nil
+	case "pgdown":
+		a.agentScroll -= 5
+		if a.agentScroll < 0 {
+			a.agentScroll = 0
+		}
+		return a, nil
+	case "enter":
+		prompt := strings.TrimSpace(a.agentInput.Value())
+		if prompt == "" || a.agentRunning {
+			return a, nil
+		}
+		bridgeCmd := a.ensureApproveBridge()
+		a.agentInput.SetValue("")
+		a.agentEntries = append(a.agentEntries, agentEntry{role: "user", text: prompt})
+		a.agentRunning = true
+		a.agentScroll = 0
+		return a, tea.Batch(bridgeCmd,
+			agentChatCmd(a.packDir, prompt, a.agentStarted, a.agentMode, a.mcpConfigPath))
+	}
+	var cmd tea.Cmd
+	a.agentInput, cmd = a.agentInput.Update(m)
+	return a, cmd
+}
+
+// updateHomeActions handles keys while the action button row is focused.
+func (a *App) updateHomeActions(m tea.KeyMsg) (tea.Model, tea.Cmd) {
+	key := m.String()
+	switch key {
+	case "q":
+		return a, tea.Quit
+	case "esc":
+		return a, nil // esc never activates anything
+	case "left", "h":
+		if a.homeBtnIdx == 0 {
+			// Walked off the left edge — into the mod list.
+			return a, a.focusHome(0)
+		}
+		a.homeBtnIdx--
+	case "up", "k":
+		a.homeBtnIdx = (a.homeBtnIdx - 1 + len(homeButtons)) % len(homeButtons)
+	case "right", "l":
+		if a.homeBtnIdx < len(homeButtons)-1 {
+			a.homeBtnIdx++
+		}
+	case "down", "j":
+		a.homeBtnIdx = (a.homeBtnIdx + 1) % len(homeButtons)
+	case "enter", " ":
+		return a.homeActivate(homeButtons[a.homeBtnIdx].action)
+	case "e":
+		a.serverIPInput.SetValue(ReadServerAddress(a.packDir))
+		a.serverIPInput.Focus()
+		a.screen = ScreenServerIP
+		return a, textinput.Blink
+	case "g":
+		return a, a.openLazygit()
+	case "m":
+		return a, a.focusHome(0)
+	case "c":
+		return a, tea.Batch(a.focusHome(1), textinput.Blink)
+	default:
+		if len(key) == 1 && key[0] >= '1' && key[0] <= '9' {
+			idx := int(key[0] - '1')
+			if idx < len(homeButtons) {
+				a.homeBtnIdx = idx
+				return a.homeActivate(homeButtons[idx].action)
+			}
+		}
+	}
+	return a, nil
+}
+
+// updateHomeHeaderBox handles keys while the IP (3) or loader (4) header box
+// is focused.
+func (a *App) updateHomeHeaderBox(m tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.String() {
+	case "q":
+		return a, tea.Quit
+	case "esc":
+		return a, a.focusHome(2)
+	case "left", "h":
+		if a.homeFocus == 4 {
+			return a, a.focusHome(3)
+		}
+	case "right", "l":
+		if a.homeFocus == 3 {
+			return a, a.focusHome(4)
+		}
+	case "down", "j":
+		return a, a.focusHome(0)
+	case "enter", " ":
+		if a.homeFocus == 3 {
+			a.serverIPInput.SetValue(ReadServerAddress(a.packDir))
+			a.serverIPInput.Focus()
+			a.screen = ScreenServerIP
+			return a, textinput.Blink
+		}
+		a.screen = ScreenManageLoader
+	}
+	return a, nil
+}
+
+func (a *App) homeActivate(action string) (tea.Model, tea.Cmd) {
+	switch action {
+	case "launch":
+		// Already running → the button reads Stop Client and kills it.
+		if a.clientUp {
+			if a.cmdRunning && a.cmdTitle == "▷ Launch Client" && a.cmdProc != nil && a.cmdProc.Process != nil {
+				syscall.Kill(-a.cmdProc.Process.Pid, syscall.SIGTERM)
+			}
+			go stopClientProcs(a.packDir, a.packMeta)
+			a.clientUp = false
+			a.statusMsg = "Stopping client…"
+			a.statusIsErr = false
+			a.statusExpire = time.Now().Add(4 * time.Second)
+			return a, a.expireStatus()
+		}
+		// Prefer the local PrismLauncher; fall back to portablemc (the same
+		// launcher the test harness uses) streamed into the command pane.
+		instName := artifactBase(a.packDir, a.packMeta)
+		if c := launchPrismCmd(instName); c != nil {
+			if !prismInstanceExists(instName) {
+				a.showInfo("Not installed in Prism", "Run Install to Prism first, then launch again.", true)
+				return a, nil
+			}
+			c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			if err := c.Start(); err != nil {
+				a.showInfo("Launch failed", err.Error(), true)
+				return a, nil
+			}
+			go c.Wait()
+			a.clientUp = true // optimistic; the poll confirms
+			a.statusMsg = "Launching " + instName + " via PrismLauncher…"
+			a.statusIsErr = false
+			a.statusExpire = time.Now().Add(5 * time.Second)
+			return a, a.expireStatus()
+		}
+		a.clientUp = true // optimistic; the poll confirms
+		return a, a.startHomeCommand("▷ Launch Client", "launch-client")
+	case "testserver":
+		return a, a.startHomeCommand("▶ Test Server", "test", "server")
+	case "testfull":
+		return a, a.startHomeCommand("◉ Test Both", "test", "full")
+	case "prism":
+		if prismRunning() {
+			a.showInfo("Prism is running", "Close PrismLauncher first, then install again — it rescans instances on startup.", true)
+			return a, nil
+		}
+		a.statusMsg = "Installing to Prism…"
+		a.statusIsErr = false
+		a.statusExpire = time.Now().Add(30 * time.Second)
+		packDir := a.packDir
+		return a, func() tea.Msg {
+			var buf strings.Builder
+			err := InstallPrism(packDir, &buf)
+			return msgPrismDone{out: buf.String(), err: err}
+		}
+	case "sources":
+		a.sourceCounts = CountModSources(a.packDir)
+		a.sourcesSel = 1
+		a.sourcesModal = true
+	case "push":
+		a.startOutput()
+		return a, a.gitPush()
+	case "discard":
+		if a.changedCount == 0 {
+			a.statusMsg = "nothing to discard"
+			a.statusIsErr = false
+			a.statusExpire = time.Now().Add(3 * time.Second)
+			return a, a.expireStatus()
+		}
+		a.confirmDiscard = true
+	case "exit":
+		return a, tea.Quit
+	}
+	return a, nil
+}
+
+// discardChanges resets the working tree and drops untracked files
+// (gitignored state like .packwiz-tui/ is untouched).
+func (a *App) discardChanges() tea.Cmd {
+	repoRoot := a.repoRoot
+	return func() tea.Msg {
+		c := exec.Command("git", "reset", "--hard", "HEAD")
+		c.Dir = repoRoot
+		out, err := c.CombinedOutput()
+		if err != nil {
+			return msgCmdDone{output: string(out), err: err}
+		}
+		c = exec.Command("git", "clean", "-fd")
+		c.Dir = repoRoot
+		out2, err := c.CombinedOutput()
+		return msgCmdDone{output: string(out) + string(out2), err: err}
+	}
+}
+
+// updateMainMenuList is the narrow (mobile aspect ratio) fallback: the
+// original vertical list menu.
+func (a *App) updateMainMenuList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return a, nil
@@ -785,6 +1905,76 @@ func (a *App) activateMenuItem() (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
+// startHomeCommand runs this binary's own CLI subcommand as a background
+// subprocess, streaming its output into the home screen's command pane.
+func (a *App) startHomeCommand(title string, args ...string) tea.Cmd {
+	if a.cmdRunning {
+		a.showInfo("Busy", "A command is already running — wait for it to finish or close it.", true)
+		return nil
+	}
+	self, err := os.Executable()
+	if err != nil {
+		self = os.Args[0]
+	}
+	c := exec.Command(self, args...)
+	c.Dir = a.packDir
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	stdout, err := c.StdoutPipe()
+	if err != nil {
+		a.showInfo("Failed to start", err.Error(), true)
+		return nil
+	}
+	c.Stderr = c.Stdout
+	if err := c.Start(); err != nil {
+		a.showInfo("Failed to start", err.Error(), true)
+		return nil
+	}
+	a.cmdRunning, a.cmdDone = true, false
+	a.cmdErr = nil
+	a.cmdTitle = title
+	a.cmdLines = nil
+	a.cmdProc = c
+	a.cmdIsTest = len(args) > 0 && args[0] == "test"
+	a.cmdGen++
+	a.cmdCloseAt = time.Time{}
+	a.cmdSummary = nil
+	ch := make(chan tea.Msg, 64)
+	a.cmdCh = ch
+	go func() {
+		sc := bufio.NewScanner(stdout)
+		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		for sc.Scan() {
+			ch <- msgHomeCmdLine{line: stripANSI(sc.Text())}
+		}
+		ch <- msgHomeCmdExit{err: c.Wait()}
+		close(ch)
+	}()
+	return a.waitHomeCmd()
+}
+
+// waitHomeCmd pumps the next streamed line (or exit) into the update loop.
+func (a *App) waitHomeCmd() tea.Cmd {
+	ch := a.cmdCh
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return msg
+	}
+}
+
+// showInfo opens the info popup over the home screen.
+func (a *App) showInfo(title, text string, isErr bool) {
+	a.infoTitle, a.infoText, a.infoErr = title, text, isErr
+}
+
+// prismRunning reports whether PrismLauncher is currently open.
+func prismRunning() bool {
+	err := exec.Command("pgrep", "-f", "[Pp]rism[Ll]auncher").Run()
+	return err == nil
+}
+
 // runSelfCommand suspends the TUI and runs this binary's own CLI subcommand
 // in the real terminal, so long-running tests stream output live.
 func (a *App) runSelfCommand(args ...string) tea.Cmd {
@@ -826,6 +2016,7 @@ func (a *App) updateServerIP(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.serverIPError = err.Error()
 				return a, nil
 			}
+			a.serverAddr = addr
 			a.serverIPError = ""
 			a.serverIPInput.Blur()
 			a.screen = ScreenMainMenu
@@ -851,32 +2042,38 @@ func (a *App) updateManageLoader(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
+// updateAddModModal handles input while the add-mod modal is open (shared by
+// the manage-mods screen and the home screen's embedded mods pane).
+func (a *App) updateAddModModal(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m, ok := msg.(tea.KeyMsg); ok {
+		switch m.String() {
+		case "ctrl+c":
+			return a, tea.Quit
+		case "esc":
+			a.addModModal = false
+			a.addModInput.SetValue("")
+			return a, nil
+		case "enter":
+			name := strings.TrimSpace(a.addModInput.Value())
+			if name == "" {
+				return a, nil
+			}
+			a.addModModal = false
+			a.addModInput.SetValue("")
+			a.returnToAddModal = true
+			a.startOutput()
+			return a, a.runPackwiz("mr", "add", name)
+		}
+	}
+	var cmd tea.Cmd
+	a.addModInput, cmd = a.addModInput.Update(msg)
+	return a, cmd
+}
+
 func (a *App) updateManageMods(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Modal captures all input.
 	if a.addModModal {
-		if m, ok := msg.(tea.KeyMsg); ok {
-			switch m.String() {
-			case "ctrl+c":
-				return a, tea.Quit
-			case "esc":
-				a.addModModal = false
-				a.addModInput.SetValue("")
-				return a, nil
-			case "enter":
-				name := strings.TrimSpace(a.addModInput.Value())
-				if name == "" {
-					return a, nil
-				}
-				a.addModModal = false
-				a.addModInput.SetValue("")
-				a.returnToAddModal = true
-				a.startOutput()
-				return a, a.runPackwiz("mr", "add", name)
-			}
-		}
-		var cmd tea.Cmd
-		a.addModInput, cmd = a.addModInput.Update(msg)
-		return a, cmd
+		return a.updateAddModModal(msg)
 	}
 
 	if m, ok := msg.(tea.KeyMsg); ok {
@@ -1006,6 +2203,10 @@ func (a *App) updateOutput(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if a.outputErr {
 					a.screen = ScreenMainMenu
 					a.returnToAddModal = false
+				} else if a.wideHome() {
+					// The home screen embeds the mod list — refresh in place.
+					a.screen = ScreenMainMenu
+					return a, a.loadMods()
 				} else {
 					a.loadingMsg = "Refreshing mod list…"
 					a.screen = ScreenLoading
@@ -1041,7 +2242,11 @@ func (a *App) updateInteractive(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, tea.Quit
 	case "esc":
 		// Cancel and go back
-		a.screen = ScreenManageMods
+		if a.wideHome() {
+			a.screen = ScreenMainMenu
+		} else {
+			a.screen = ScreenManageMods
+		}
 		a.returnToAddModal = false
 		return a, nil
 	case "up", "k":
@@ -1179,6 +2384,8 @@ func (a *App) View() string {
 		body = a.viewRepoSelect()
 	case ScreenCloneRepo:
 		body = a.viewCloneRepo()
+	case ScreenCreateRepo:
+		body = a.viewCreateRepo()
 	case ScreenMainMenu:
 		body = a.viewMainMenu()
 	case ScreenManageMods:
@@ -1206,10 +2413,24 @@ func (a *App) viewStatusBar() string {
 		hints = []string{"↑↓ navigate", "enter select", "q quit"}
 	case ScreenCloneRepo:
 		hints = []string{"enter clone", "esc back", "ctrl+c quit"}
+	case ScreenCreateRepo:
+		hints = []string{"enter create", "tab visibility", "esc back", "ctrl+c quit"}
 	case ScreenServerIP:
 		hints = []string{"enter save", "esc cancel", "ctrl+c quit"}
 	case ScreenMainMenu:
-		hints = []string{"↑↓ navigate", "enter select", "1-9 shortcut", "g lazygit", "c agent", "q quit"}
+		if !a.wideHome() {
+			hints = []string{"↑↓ navigate", "enter select", "1-9 shortcut", "g lazygit", "c agent", "q quit"}
+		} else if a.agentFull || a.homeFocus == 1 {
+			hints = []string{"enter send", "shift+tab mode", "ctrl+f fullscreen", "pgup/pgdn scroll", "tab next pane", "esc back"}
+		} else if a.homeFocus == 0 {
+			hints = []string{"enter details", "e edit", "/ search", "n add", "d delete/restore", "r refresh", "tab next pane"}
+		} else if a.homeFocus == 3 || a.homeFocus == 4 {
+			hints = []string{"enter edit", "tab next pane", "esc back", "q quit"}
+		} else if a.homeFocus == 5 {
+			hints = []string{"↑↓ navigate", "enter select", "s side", "o optional", "v versions", "esc close"}
+		} else {
+			hints = []string{"←→ navigate", "enter select", "1-8 shortcut", "e address", "g lazygit", "tab next pane", "q quit"}
+		}
 	case ScreenManageMods:
 		hints = []string{"enter edit", "g lazygit", "r refresh", "/ search", "n add", "d delete/restore", "esc back"}
 	case ScreenOutput:

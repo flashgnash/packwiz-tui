@@ -251,6 +251,17 @@ func RunCLI(args []string) (handled bool, exitCode int) {
 		}
 		return true, 0
 
+	case "mcp-approve":
+		// Internal: MCP permission-prompt server for the embedded agent chat.
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: packwiz-tui mcp-approve <socket>")
+			return true, 1
+		}
+		if err := RunMCPApprove(args[1]); err != nil {
+			return true, 1
+		}
+		return true, 0
+
 	case "agent":
 		c, err := agentCommand(findPack())
 		if err != nil {
