@@ -35,6 +35,10 @@ commands:
   install-prism      write the self-updating instance into the local PrismLauncher
   nixos-config       print a services.minecraft-servers block for the nix-minecraft
                      flake module, ready to paste into nixos-configuration (glados-style)
+  changelog          markdown changelog between two refs: mod adds/removals diffed
+                     from git, other changes described by the configured agent
+                     (falls back to a file list). Flags: --from <ref> --to <ref>
+                     (defaults: previous tag → HEAD)
   release [tag]      export all + publish a GitHub release via gh (default tag: v<pack version>)
   init-workflow      scaffold .github/workflows/release.yml (build artifacts on every
                      push; publish a GitHub release on v* tag push)
@@ -187,6 +191,19 @@ func RunCLI(args []string) (handled bool, exitCode int) {
 			fmt.Fprintf(os.Stderr, "FAILED: %v\n", err)
 			return true, 1
 		}
+		return true, 0
+
+	case "changelog":
+		fs := flag.NewFlagSet("changelog", flag.ExitOnError)
+		from := fs.String("from", "", "base ref (default: previous tag)")
+		to := fs.String("to", "", "target ref (default: HEAD)")
+		fs.Parse(args[1:])
+		md, err := Changelog(findPack(), *from, *to, os.Stderr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "FAILED: %v\n", err)
+			return true, 1
+		}
+		fmt.Print(md)
 		return true, 0
 
 	case "release":

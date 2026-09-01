@@ -25,8 +25,16 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # Optional: add this repo secret to get LLM-written changelog sections
+      # for config/script changes. Without it the changelog still lists mod
+      # additions/removals (from git) plus a changed-file list.
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history + tags — the changelog diffs against the previous tag.
+          fetch-depth: 0
 
       - uses: actions/setup-java@v4
         with:
@@ -48,8 +56,33 @@ jobs:
           go install github.com/packwiz/packwiz@latest
           go install github.com/flashgnash/packwiz-tui@master
 
+      - name: Install claude (LLM changelog descriptions)
+        if: env.ANTHROPIC_API_KEY != ''
+        run: npm install -g @anthropic-ai/claude-code
+
       - name: Build artifacts
         run: packwiz-tui export all
+
+      - name: Compose release notes
+        run: |
+          {
+            echo "- **-prism.zip** — import into PrismLauncher; downloads the pack on first launch and auto-updates from this repo (recommended)"
+            echo "- **-prism-preinstalled.zip** — same, but with all mods already bundled; no first-launch wait"
+            echo "- **-curseforge.zip** — import into the CurseForge app"
+            echo "- **.mrpack** — import into Prism or the Modrinth app"
+            echo "- **-server.zip** — ready-to-run server files"
+          } > .packwiz-tui/release-notes.md
+          # Changelog vs the previous tag: mod adds/removals diffed from git,
+          # other changes described by claude (or listed if no API key).
+          prev=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)
+          if packwiz-tui changelog > .packwiz-tui/changelog.md && [ -s .packwiz-tui/changelog.md ]; then
+            {
+              echo
+              echo "# Changes${prev:+ since $prev}"
+              echo
+              cat .packwiz-tui/changelog.md
+            } >> .packwiz-tui/release-notes.md
+          fi
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
@@ -69,15 +102,11 @@ jobs:
           {
             echo "Rolling build of the default branch."
             echo
-            echo "- **-prism.zip** — import into PrismLauncher; downloads the pack on first launch and auto-updates from this repo (recommended)"
-            echo "- **-prism-preinstalled.zip** — same, but with all mods already bundled; no first-launch wait"
-            echo "- **-curseforge.zip** — import into the CurseForge app"
-            echo "- **.mrpack** — import into Prism or the Modrinth app"
-            echo "- **-server.zip** — ready-to-run server files"
-          } > .packwiz-tui/release-notes.md
+            cat .packwiz-tui/release-notes.md
+          } > .packwiz-tui/rolling-notes.md
           gh release delete latest --yes 2>/dev/null || true
           gh release create latest --title "Latest build (rolling)" \
-            --notes-file .packwiz-tui/release-notes.md \
+            --notes-file .packwiz-tui/rolling-notes.md \
             .packwiz-tui/build/*.zip .packwiz-tui/build/*.mrpack
 
       - name: Create release
@@ -87,7 +116,7 @@ jobs:
         run: |
           gh release create "${GITHUB_REF_NAME}" \
             --title "${GITHUB_REF_NAME}" \
-            --generate-notes \
+            --notes-file .packwiz-tui/release-notes.md \
             .packwiz-tui/build/*.zip .packwiz-tui/build/*.mrpack
 `
 
