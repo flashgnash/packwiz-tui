@@ -2,20 +2,24 @@ package main
 
 import "github.com/charmbracelet/lipgloss"
 
-// Colour palette — forge dark with molten orange accents.
+// Colour palette — material-monokai house theme (see /etc/nixos/STYLE.md):
+// dark teal surfaces, a single lime accent.
 var (
-	colorBg        = lipgloss.Color("#0d0f14")
-	colorBgPanel   = lipgloss.Color("#141720")
-	colorBgHover   = lipgloss.Color("#1c2030")
-	colorBorder    = lipgloss.Color("#2a3045")
-	colorBorderFoc = lipgloss.Color("#ff6b2b")
-	colorAccent    = lipgloss.Color("#ff6b2b")
-	colorAccent2   = lipgloss.Color("#ffab76")
-	colorText      = lipgloss.Color("#e8eaf0")
-	colorMuted     = lipgloss.Color("#5a6380")
-	colorDanger    = lipgloss.Color("#ff4444")
-	colorSuccess   = lipgloss.Color("#44cc88")
-	colorInfo      = lipgloss.Color("#5599ff")
+	colorBg        = lipgloss.Color("#192227") // cBg — window background
+	colorBgPanel   = lipgloss.Color("#263238") // cPanel — raised panel / button face
+	colorBgInset   = lipgloss.Color("#11181c") // cInset — sunken areas / inputs
+	colorBgHover   = lipgloss.Color("#314048") // cHover — hover fill
+	colorBorder    = lipgloss.Color("#3a4a52") // cBorder
+	colorBorderFoc = lipgloss.Color("#9dff00") // focused border = the accent
+	colorAccent    = lipgloss.Color("#9dff00") // cAccent — THE accent (lime)
+	colorAccent2   = lipgloss.Color("#8db946") // cAccentDark — pressed / secondary
+	colorText      = lipgloss.Color("#ffffff") // cText
+	colorMuted     = lipgloss.Color("#8f989d") // cTextDim (≈55% white over cBg)
+	colorDanger    = lipgloss.Color("#bf616a") // cCritical
+	colorWarning   = lipgloss.Color("#cc7a00") // cWarning
+	colorSuccess   = lipgloss.Color("#9dff00") // one accent — success is lime too
+	colorInfo      = lipgloss.Color("#00b4d8") // svPalette blue
+	colorOnAccent  = lipgloss.Color("#1a1a1a") // label colour on an accent fill
 )
 
 var (
@@ -166,6 +170,99 @@ var (
 	styleHighlight = lipgloss.NewStyle().
 			Foreground(colorAccent2).
 			Bold(true)
+
+	// ── Home dashboard cards ──
+	// Cards sit on the dark terminal background with the lighter cPanel fill.
+	// Terminal bg resets inside nested styles, so every text style used inside
+	// a card carries the card background explicitly; padCard fills the rest.
+
+	styleCardBorder = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorBorder)
+
+	styleCardBorderFoc = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(colorAccent)
+
+	styleCardFill = lipgloss.NewStyle().
+			Background(colorBgPanel)
+
+	styleCardText = lipgloss.NewStyle().
+			Foreground(colorText).
+			Background(colorBgPanel)
+
+	styleCardMuted = lipgloss.NewStyle().
+			Foreground(colorMuted).
+			Background(colorBgPanel)
+
+	styleCardAccent = lipgloss.NewStyle().
+			Foreground(colorAccent).
+			Bold(true).
+			Background(colorBgPanel)
+
+	styleCardTitle = lipgloss.NewStyle().
+			Foreground(colorAccent).
+			Bold(true).
+			Background(colorBgPanel)
+
+	styleCardTitleDim = lipgloss.NewStyle().
+				Foreground(colorMuted).
+				Bold(true).
+				Background(colorBgPanel)
+
+	// ── Home dashboard ──
+
+	styleHomeTitle = lipgloss.NewStyle().
+			Foreground(colorAccent).
+			Bold(true)
+
+	stylePaneTitle = lipgloss.NewStyle().
+			Foreground(colorAccent).
+			Bold(true)
+
+	stylePaneTitleDim = lipgloss.NewStyle().
+				Foreground(colorMuted).
+				Bold(true)
+
+	// Button chips — cPanel face; active = accent fill with a dark label
+	// (the house MIX-toggle idiom).
+	styleBtn = lipgloss.NewStyle().
+			Foreground(colorText).
+			Background(colorBgPanel).
+			Padding(0, 1)
+
+	styleBtnFocused = lipgloss.NewStyle().
+			Foreground(colorOnAccent).
+			Background(colorAccent).
+			Bold(true).
+			Padding(0, 1)
+
+	styleBtnDanger = lipgloss.NewStyle().
+			Foreground(colorText).
+			Background(colorBgPanel).
+			Padding(0, 1)
+
+	// Real bordered buttons for the home action panel — cBorder box, accent
+	// border + accent label when focused (the house sign-in-form primary idiom).
+	styleHomeBtn = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorBorder).
+			Foreground(colorText).
+			Padding(0, 1)
+
+	styleHomeBtnFocused = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(colorAccent).
+				Foreground(colorAccent).
+				Bold(true).
+				Padding(0, 1)
+
+	styleAgentUser = lipgloss.NewStyle().
+			Foreground(colorAccent).
+			Bold(true)
+
+	styleAgentText = lipgloss.NewStyle().
+			Foreground(colorText)
 )
 
 // spinnerFrames for the loading animation.
