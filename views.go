@@ -1395,7 +1395,7 @@ func (a *App) viewAddModModal() string {
 		hit := a.addModHits[a.addModIdx]
 		lc, lr := a.addModLogoSize(rw, len(hit.Gallery) > 0)
 		logo := ""
-		if color && hit.IconURL != "" {
+		if color && hit.IconURL != "" && a.logoRenderable(rw) {
 			logo = a.addModImgs[imgKey(hit.IconURL, lc, lr)]
 		}
 		logoOK := logo != "" && logo != pendingImg
@@ -1445,9 +1445,10 @@ func (a *App) viewAddModModal() string {
 			prev = append(prev, center(titleLine))
 			prev = append(prev, center(dlLine))
 		}
-		// Gallery page: whole screenshots packed into up to two wrapped
-		// rows, paginated with shift+←/→ or the ‹ › arrows.
-		if color && len(hit.Gallery) > 0 {
+		// Gallery page: whole screenshots side by side, paginated with
+		// shift+←/→ or the ‹ › arrows. Skipped entirely when the pane can't
+		// give half-block art enough pixels to be legible.
+		if color && len(hit.Gallery) > 0 && a.shotsRenderable(rw) {
 			start, end, shotRows, _ := a.addModShotWindow(hit, rw)
 			prev = append(prev, "")
 			if len(shotRows) == 0 {

@@ -2277,6 +2277,20 @@ func (a *App) addModLogoSize(rw int, hasShot bool) (cols, rows int) {
 	return c, c / 2
 }
 
+// shotsRenderable reports whether gallery screenshots are worth drawing:
+// real kitty images always are, but half-block art needs a reasonable pixel
+// budget — below ~56 art columns a screenshot is unreadable mush (narrow
+// panes, phones over SSH), so the gallery is dropped entirely.
+func (a *App) shotsRenderable(rw int) bool {
+	return kittyGraphicsOK() || rw-2 >= 56
+}
+
+// logoRenderable is the same gate for the preview logo, which stays legible
+// down to smaller sizes than a screenshot does.
+func (a *App) logoRenderable(rw int) bool {
+	return kittyGraphicsOK() || rw >= 44
+}
+
 // addModImageCmds queues fetches for every image the popup currently wants:
 // the selected hit's logo and first screenshot, plus (kitty graphics only)
 // the row icons for the whole result list. Each key is fetched once per
@@ -2315,12 +2329,14 @@ func (a *App) addModImageCmds() tea.Cmd {
 	}
 	if a.addModIdx < len(a.addModHits) {
 		hit := a.addModHits[a.addModIdx]
-		lc, lr := a.addModLogoSize(rw, len(hit.Gallery) > 0)
-		fetch(hit.IconURL, lc, lr)
+		if a.logoRenderable(rw) {
+			lc, lr := a.addModLogoSize(rw, len(hit.Gallery) > 0)
+			fetch(hit.IconURL, lc, lr)
+		}
 		// Fetch gallery images one at a time from the page start —
-		// msgAddModImg re-runs this, so the page fills until both its rows
-		// are out of room.
-		if len(hit.Gallery) > 0 {
+		// msgAddModImg re-runs this, so the page fills until it's out of
+		// room.
+		if len(hit.Gallery) > 0 && a.shotsRenderable(rw) {
 			fetch(hit.Gallery[clamp(a.addModShotIdx, 0, len(hit.Gallery)-1)], rw-2, 14)
 			_, end, shotRows, full := a.addModShotWindow(hit, rw)
 			if len(shotRows) > 0 && !full && end < len(hit.Gallery) {
@@ -2417,10 +2433,10 @@ func (a *App) addModShotMove(dir int) tea.Cmd {
 		return nil
 	}
 	hit := a.addModHits[a.addModIdx]
-	if len(hit.Gallery) < 2 {
+	_, rw := a.addModPaneWidths()
+	if len(hit.Gallery) < 2 || !a.shotsRenderable(rw) {
 		return nil
 	}
-	_, rw := a.addModPaneWidths()
 	oldStart, oldEnd, _, _ := a.addModShotWindow(hit, rw)
 	a.addModPrevScroll = 0
 	if dir < 0 {
