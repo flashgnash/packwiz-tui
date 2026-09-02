@@ -77,6 +77,7 @@ type msgAddModResults struct {
 	err  error
 }
 type msgAddModImg struct{ key, block string }
+type msgAddModDesc struct{ key, text string }
 
 // testSummary holds the stats shown after a test run finishes.
 type testSummary struct {
@@ -264,6 +265,9 @@ type App struct {
 	// "" = failed, pendingImg = in flight), and the kitty image id counter.
 	addModImgs   map[string]string
 	kittyImgSeq  int
+	// Full plain-text descriptions by source/projectID — the search APIs
+	// only carry one-line summaries ("" = failed, pendingImg = in flight).
+	addModDescs map[string]string
 
 	// Output screen
 	outputLines []string
@@ -1107,6 +1111,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// once this one's width is known.
 			return a, a.addModImageCmds()
 		}
+		return a, nil
+
+	case msgAddModDesc:
+		if a.addModDescs == nil {
+			a.addModDescs = map[string]string{}
+		}
+		a.addModDescs[m.key] = m.text
 		return a, nil
 
 	case msgCmdPaneAutoClose:
@@ -2255,7 +2266,10 @@ func (a *App) searchAddMod() tea.Cmd {
 // rendering agree: a slim list column, the rest to the preview. rw is 0 in
 // the narrow single-column layout (no preview, no images).
 func (a *App) addModPaneWidths() (lw, rw int) {
-	w := clamp(a.width-8, 46, 130)
+	// The 46-col floor must never exceed the terminal itself — an oversized
+	// popup wraps lines and shifts the whole frame (blank/garbled rows on
+	// phone-sized terminals).
+	w := minInt(clamp(a.width-8, 46, 130), a.width)
 	fw, _ := styleModal.GetFrameSize()
 	cw := w - fw
 	if cw < 72 {
@@ -2300,14 +2314,24 @@ func (a *App) logoRenderable(rw int) bool {
 // session; the bytes are disk-cached besides.
 func (a *App) addModImageCmds() tea.Cmd {
 	_, rw := a.addModPaneWidths()
-	if !terminalDoesColor() || rw <= 0 {
-		return nil
+	if rw <= 0 {
+		return nil // narrow layout has no preview
+	}
+	var cmds []tea.Cmd
+	// The selected hit's full description (text — wanted regardless of
+	// image support).
+	if a.addModIdx < len(a.addModHits) {
+		if cmd := a.fetchAddModDesc(a.addModHits[a.addModIdx]); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	if !terminalDoesColor() {
+		return tea.Batch(cmds...)
 	}
 	kitty := kittyGraphicsOK()
 	if a.addModImgs == nil {
 		a.addModImgs = map[string]string{}
 	}
-	var cmds []tea.Cmd
 	fetch := func(u string, maxCols, maxRows int) {
 		if u == "" || maxCols < 1 || maxRows < 1 {
 			return
@@ -2425,6 +2449,29 @@ func (a *App) addModShotWindow(hit ModHit, rw int) (start, end int, shotRows [][
 		end = start + 1 // the current slot always shows (spinner while loading)
 	}
 	return start, end, shotRows, full
+}
+
+// descKey identifies a full-description cache entry.
+func descKey(h ModHit) string { return h.Source + "/" + h.ProjectID }
+
+// fetchAddModDesc starts the full-description fetch for a hit, once.
+func (a *App) fetchAddModDesc(hit ModHit) tea.Cmd {
+	if a.addModDescs == nil {
+		a.addModDescs = map[string]string{}
+	}
+	key := descKey(hit)
+	if _, started := a.addModDescs[key]; started {
+		return nil
+	}
+	a.addModDescs[key] = pendingImg
+	source, id := hit.Source, hit.ProjectID
+	return func() tea.Msg {
+		text, err := FetchFullDescription(source, id)
+		if err != nil {
+			text = ""
+		}
+		return msgAddModDesc{key: key, text: text}
+	}
 }
 
 // addModShotMove paginates the gallery window. Left slides back one image;

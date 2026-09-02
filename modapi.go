@@ -5,11 +5,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -514,6 +516,54 @@ func curseforgeModInfo(slug, mc, loader string, limit int, out io.Writer) error 
 	fmt.Fprintf(out, "install latest: packwiz curseforge add %s\n", m.Slug)
 	fmt.Fprintf(out, "install specific: packwiz curseforge add --addon-id %s --file-id <id>\n", id)
 	return nil
+}
+
+// FetchFullDescription returns a project's complete description as plain
+// text — the search APIs only carry the one-line summary. Modrinth serves
+// markdown (project body), CurseForge serves HTML.
+func FetchFullDescription(source, projectID string) (string, error) {
+	if source == "curseforge" {
+		var res struct {
+			Data string `json:"data"`
+		}
+		if err := curseforgeGet("/mods/"+projectID+"/description", nil, &res); err != nil {
+			return "", err
+		}
+		return plainDescription(res.Data), nil
+	}
+	var p struct {
+		Body string `json:"body"`
+	}
+	if err := modrinthGet("/project/"+url.PathEscape(projectID), nil, &p); err != nil {
+		return "", err
+	}
+	return plainDescription(p.Body), nil
+}
+
+var (
+	reHTMLBreak = regexp.MustCompile(`(?i)<br\s*/?>|</p>|</div>|</h[1-6]>|</li>|</tr>`)
+	reHTMLTag   = regexp.MustCompile(`<[^>]*>`)
+	reMDImage   = regexp.MustCompile(`!\[[^\]]*\]\([^)]*\)`)
+	reMDLink    = regexp.MustCompile(`\[([^\]]*)\]\([^)]*\)`)
+	reMDHeading = regexp.MustCompile(`(?m)^#{1,6}\s*`)
+	reBlankRuns = regexp.MustCompile(`\n{3,}`)
+)
+
+// plainDescription flattens markdown/HTML into terminal-friendly text.
+func plainDescription(s string) string {
+	s = reMDImage.ReplaceAllString(s, "")
+	s = reMDLink.ReplaceAllString(s, "$1")
+	s = reHTMLBreak.ReplaceAllString(s, "\n")
+	s = reHTMLTag.ReplaceAllString(s, "")
+	s = html.UnescapeString(s)
+	s = strings.ReplaceAll(s, "\r", "")
+	s = reMDHeading.ReplaceAllString(s, "")
+	s = strings.NewReplacer("**", "", "__", "", "`", "").Replace(s)
+	s = strings.TrimSpace(reBlankRuns.ReplaceAllString(s, "\n\n"))
+	if r := []rune(s); len(r) > 4000 {
+		s = string(r[:4000]) + "…"
+	}
+	return s
 }
 
 // humanCount renders a download count compactly (1.2M, 33k).

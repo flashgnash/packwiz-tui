@@ -1268,7 +1268,9 @@ func hitSourceTags(h ModHit, wide bool) (string, int) {
 // bigger pane means more resolution) elsewhere, nothing on no-color
 // terminals. Narrow terminals get the list only, no preview.
 func (a *App) viewAddModModal() string {
-	h := clamp(a.height-4, 14, 40)
+	// Like the width floor, the height floor must fit the terminal (minus
+	// the status bar) or lines wrap and the frame shifts.
+	h := minInt(clamp(a.height-4, 14, 40), a.height-1)
 	_, fh := styleModal.GetFrameSize()
 	ch := h - fh
 	lw, rw := a.addModPaneWidths()
@@ -1355,12 +1357,14 @@ func (a *App) viewAddModModal() string {
 	}
 	hint := muted.Render(truncate("↑/↓ select · ←/→ buttons · enter go · esc close", lw))
 
-	// ✕ close button pinned to the popup's top-right corner.
+	// ✕ close button pinned to the popup's top-right corner — labelled and
+	// wide, with a two-row click zone, so it's a workable touch target.
+	const closeLabel = "✕ close"
 	closeModalBtn := func(lines []string, width int) []string {
-		if pad := width - 2 - lipgloss.Width(lines[0]); pad > 0 {
+		if pad := width - len(closeLabel) - 1 - lipgloss.Width(lines[0]); pad > 0 {
 			lines[0] += strings.Repeat(" ", pad)
 		}
-		lines[0] += " " + styleCardAccent.Render("✕")
+		lines[0] += " " + styleCardAccent.Render(closeLabel)
 		return lines
 	}
 
@@ -1376,7 +1380,7 @@ func (a *App) viewAddModModal() string {
 		}
 		lines = append(lines[:ch-1], hint)
 		lines = closeModalBtn(lines, cw)
-		zone(cw-2, 0, 2, 1, "addmod:close")
+		zone(cw-len(closeLabel)-1, 0, len(closeLabel)+3, 2, "addmod:close")
 		return styleModal.Render(strings.Join(paintModalBg(lines), "\n"))
 	}
 
@@ -1516,9 +1520,17 @@ func (a *App) viewAddModModal() string {
 				prev = append(prev, strings.Repeat(" ", off)+line)
 			}
 		}
-		// Full description — never cut off; the pane scrolls instead.
+		// Full description — the search APIs only carry a one-line summary,
+		// which stands in until the project's real description loads. Never
+		// cut off; the pane scrolls instead.
+		desc := hit.Description
+		switch full := a.addModDescs[descKey(hit)]; full {
+		case "", pendingImg: // failed or still loading — keep the summary
+		default:
+			desc = full
+		}
 		prev = append(prev, "")
-		for _, l := range wrapText(hit.Description, rw) {
+		for _, l := range wrapText(desc, rw) {
 			prev = append(prev, l)
 		}
 		// Buttons: pinned to the pane's bottom when everything fits, else
@@ -1573,7 +1585,7 @@ func (a *App) viewAddModModal() string {
 		merged[i] = l + sep + r
 	}
 	merged = closeModalBtn(merged, lw+3+rw)
-	zone(lw+3+rw-2, 0, 2, 1, "addmod:close")
+	zone(lw+3+rw-len(closeLabel)-1, 0, len(closeLabel)+3, 2, "addmod:close")
 	return styleModal.Render(strings.Join(paintModalBg(merged), "\n"))
 }
 
