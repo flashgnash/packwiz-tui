@@ -29,7 +29,7 @@
           src = ./.;
 
           proxyVendor = true;
-          vendorHash = "sha256-RNLkbNGIOm0HdMYM6daJy7L2aau4gvYTRGODoOVxNbo=";
+          vendorHash = "sha256-lMZVjSQeGOR3Z+q7r8bNExo9p0H0ql2OwiXpuekgLlY=";
 
           nativeBuildInputs = [ pkgs.makeWrapper ];
 
