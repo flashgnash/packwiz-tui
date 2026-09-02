@@ -70,6 +70,13 @@ type msgSelfCmdDone struct{ err error }
 type msgHomeCmdLine struct{ line string }
 type msgHomeCmdExit struct{ err error }
 type msgCmdPaneAutoClose struct{ gen int }
+type msgAddModDebounce struct{ seq int }
+type msgAddModResults struct {
+	seq  int
+	hits []ModHit
+	err  error
+}
+type msgAddModImg struct{ key, block string }
 
 // testSummary holds the stats shown after a test run finishes.
 type testSummary struct {
@@ -242,6 +249,21 @@ type App struct {
 	addModModal     bool
 	addModInput     textinput.Model
 	returnToAddModal bool // flag to reopen add modal after command completes
+	// Live search state for the add-mod popup: results from both APIs,
+	// debounced so typing doesn't fire a request per keystroke.
+	addModHits      []ModHit
+	addModIdx       int
+	addModSeq       int    // bumped on every edit; stale debounce ticks/results are dropped
+	addModQuery     string // last query actually dispatched to the APIs
+	addModSearching bool
+	addModErr       string
+	addModBtnIdx    int // focused preview button (install/open per source)
+	addModShotIdx   int // first gallery screenshot of the visible page
+	addModPrevScroll int // preview pane scroll offset (lines)
+	// Fetched image blocks by imgKey (kitty placeholders or half-block art;
+	// "" = failed, pendingImg = in flight), and the kitty image id counter.
+	addModImgs   map[string]string
+	kittyImgSeq  int
 
 	// Output screen
 	outputLines []string
@@ -627,6 +649,56 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m := msg.(type) {
 
 	case tea.MouseMsg:
+		// The add-mod popup captures the mouse while open: wheel scrolls its
+		// results, clicks only hit its own zones.
+		if a.addModModal {
+			if m.Button == tea.MouseButtonWheelUp || m.Button == tea.MouseButtonWheelDown {
+				delta := 1
+				if m.Button == tea.MouseButtonWheelUp {
+					delta = -1
+				}
+				// Wheel over the preview scrolls it; over the list it moves
+				// the selection.
+				lw, rw := a.addModPaneWidths()
+				fw, _ := styleModal.GetFrameSize()
+				previewX := maxInt(0, (a.width-(lw+3+rw+fw))/2) + fw/2 + lw + 3
+				if rw > 0 && m.X >= previewX {
+					a.addModPrevScroll = maxInt(0, a.addModPrevScroll+delta*3)
+					return a, nil
+				}
+				if len(a.addModHits) > 0 {
+					a.addModIdx = clamp(a.addModIdx+delta, 0, len(a.addModHits)-1)
+					a.addModBtnIdx, a.addModShotIdx, a.addModPrevScroll = 0, 0, 0
+					return a, a.addModImageCmds()
+				}
+				return a, nil
+			}
+			if m.Action == tea.MouseActionRelease && m.Button == tea.MouseButtonLeft {
+				for _, z := range a.clickZones {
+					if m.X >= z.x && m.X < z.x+z.w && m.Y >= z.y && m.Y < z.y+z.h {
+						if strings.HasPrefix(z.action, "addmod:row:") {
+							var idx int
+							fmt.Sscanf(z.action, "addmod:row:%d", &idx)
+							if idx < len(a.addModHits) {
+								a.addModIdx = idx
+								a.addModBtnIdx, a.addModShotIdx, a.addModPrevScroll = 0, 0, 0
+								return a, a.addModImageCmds()
+							}
+						} else if strings.HasPrefix(z.action, "addmod:btn:") {
+							var idx int
+							fmt.Sscanf(z.action, "addmod:btn:%d", &idx)
+							a.addModBtnIdx = idx
+							return a.activateAddModButton()
+						} else if z.action == "addmod:shotprev" {
+							return a, a.addModShotMove(-1)
+						} else if z.action == "addmod:shotnext" {
+							return a, a.addModShotMove(1)
+						}
+					}
+				}
+			}
+			return a, nil
+		}
 		// Scroll wheel over the mod list moves the selection.
 		if m.Button == tea.MouseButtonWheelUp || m.Button == tea.MouseButtonWheelDown {
 			for _, z := range a.clickZones {
@@ -638,9 +710,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					if len(a.modsFiltered) > 0 {
 						a.modsIdx = clamp(a.modsIdx+delta, 0, len(a.modsFiltered)-1)
-						if a.modDetail != nil {
-							return a, a.syncModDetail(a.modsFiltered[a.modsIdx])
-						}
+						// Wheel-scrolling the list is interaction — open (or
+						// follow with) the detail pane.
+						return a, a.syncModDetail(a.modsFiltered[a.modsIdx])
 					}
 					return a, nil
 				}
@@ -782,6 +854,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.WindowSizeMsg:
 		a.width, a.height = m.Width, m.Height
+		if a.addModModal {
+			// The popup's panes (and therefore image cell sizes) follow the
+			// terminal size — refetch/re-render what the new geometry needs.
+			// The window recomputes from the same start image, which is the
+			// closest surviving slide.
+			return a, a.addModImageCmds()
+		}
 		return a, nil
 
 	case msgSpinTick:
@@ -844,13 +923,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-		// Auto-open the detail pane for the selection when the list has
-		// focus (covers startup and reloads).
-		if a.screen == ScreenMainMenu && a.wideHome() && a.homeFocus == 0 &&
-			a.modDetail == nil && len(a.modsFiltered) > 0 && a.modsIdx < len(a.modsFiltered) {
-			a.detailPinned = false
-			return a, a.syncModDetail(a.modsFiltered[a.modsIdx])
-		}
+		// The detail pane only opens on interaction with the mod list
+		// (scrolling, clicking, tabbing in) — never from a plain reload, so
+		// startup lands on an uncluttered dashboard.
 		// A refresh triggered from the home screen stays there; the dedicated
 		// manage-mods screen is only entered from a loading transition.
 		if a.screen != ScreenMainMenu {
@@ -997,6 +1072,39 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, a.loadMods())
 		}
 		return a, tea.Batch(cmds...)
+
+	case msgAddModDebounce:
+		// Only the newest edit's tick fires a search.
+		if a.addModModal && m.seq == a.addModSeq {
+			return a, a.searchAddMod()
+		}
+		return a, nil
+
+	case msgAddModResults:
+		if !a.addModModal || m.seq != a.addModSeq {
+			return a, nil // superseded by further typing
+		}
+		a.addModSearching = false
+		a.addModHits = m.hits
+		a.addModIdx = 0
+		a.addModBtnIdx, a.addModShotIdx = 0, 0
+		a.addModErr = ""
+		if m.err != nil {
+			a.addModErr = m.err.Error()
+		}
+		return a, a.addModImageCmds()
+
+	case msgAddModImg:
+		if a.addModImgs == nil {
+			a.addModImgs = map[string]string{}
+		}
+		a.addModImgs[m.key] = m.block
+		if a.addModModal {
+			// Extend the gallery window: the next image's fetch only starts
+			// once this one's width is known.
+			return a, a.addModImageCmds()
+		}
+		return a, nil
 
 	case msgCmdPaneAutoClose:
 		if m.gen == a.cmdGen && a.cmdDone && !a.cmdRunning {
@@ -1563,16 +1671,16 @@ func (a *App) updateHomeMods(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "up", "k":
 		if !a.searchFocus && a.modsIdx > 0 {
 			a.modsIdx--
-			if a.modDetail != nil {
-				return a, a.syncModDetail(a.modsFiltered[a.modsIdx])
-			}
+			// Scrolling counts as interaction — open (or follow with) the
+			// detail pane.
+			a.detailPinned = a.detailPinned && a.modDetail != nil
+			return a, a.syncModDetail(a.modsFiltered[a.modsIdx])
 		}
 	case "down", "j":
 		if !a.searchFocus && a.modsIdx < len(a.modsFiltered)-1 {
 			a.modsIdx++
-			if a.modDetail != nil {
-				return a, a.syncModDetail(a.modsFiltered[a.modsIdx])
-			}
+			a.detailPinned = a.detailPinned && a.modDetail != nil
+			return a, a.syncModDetail(a.modsFiltered[a.modsIdx])
 		}
 	case "enter":
 		if a.searchFocus {
@@ -2042,32 +2150,331 @@ func (a *App) updateManageLoader(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
-// updateAddModModal handles input while the add-mod modal is open (shared by
-// the manage-mods screen and the home screen's embedded mods pane).
+// updateAddModModal handles input while the add-mod popup is open (shared by
+// the manage-mods screen and the home screen's embedded mods pane). Typing
+// live-searches both APIs (debounced); up/down pick a result; enter installs
+// the selection from its own source.
 func (a *App) updateAddModModal(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m, ok := msg.(tea.KeyMsg); ok {
 		switch m.String() {
 		case "ctrl+c":
 			return a, tea.Quit
 		case "esc":
-			a.addModModal = false
-			a.addModInput.SetValue("")
+			a.closeAddModModal()
 			return a, nil
+		case "up", "ctrl+p":
+			if a.addModIdx > 0 {
+				a.addModIdx--
+			}
+			a.addModBtnIdx, a.addModShotIdx, a.addModPrevScroll = 0, 0, 0
+			return a, a.addModImageCmds()
+		case "down", "ctrl+n":
+			if a.addModIdx < len(a.addModHits)-1 {
+				a.addModIdx++
+			}
+			a.addModBtnIdx, a.addModShotIdx, a.addModPrevScroll = 0, 0, 0
+			return a, a.addModImageCmds()
+		case "pgup", "pgdown":
+			// Scroll the preview pane; the view clamps to the content.
+			if m.String() == "pgup" {
+				a.addModPrevScroll = maxInt(0, a.addModPrevScroll-8)
+			} else {
+				a.addModPrevScroll += 8
+			}
+			return a, nil
+		case "left", "right":
+			// Cycle the preview's install/open buttons.
+			if a.addModIdx < len(a.addModHits) {
+				n := len(addModButtons(a.addModHits[a.addModIdx]))
+				dir := 1
+				if m.String() == "left" {
+					dir = -1
+				}
+				a.addModBtnIdx = (a.addModBtnIdx + dir + n) % n
+			}
+			return a, nil
+		case "shift+left", "shift+right":
+			dir := 1
+			if m.String() == "shift+left" {
+				dir = -1
+			}
+			return a, a.addModShotMove(dir)
 		case "enter":
+			if a.addModIdx < len(a.addModHits) {
+				return a.activateAddModButton()
+			}
+			// No results (yet) — fall back to packwiz's own search prompt.
 			name := strings.TrimSpace(a.addModInput.Value())
 			if name == "" {
 				return a, nil
 			}
 			a.addModModal = false
-			a.addModInput.SetValue("")
 			a.returnToAddModal = true
 			a.startOutput()
 			return a, a.runPackwiz("mr", "add", name)
 		}
 	}
+	before := a.addModInput.Value()
 	var cmd tea.Cmd
 	a.addModInput, cmd = a.addModInput.Update(msg)
+	if a.addModInput.Value() != before {
+		// Debounce: each edit supersedes pending ticks and in-flight results.
+		a.addModSeq++
+		seq := a.addModSeq
+		return a, tea.Batch(cmd, tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg {
+			return msgAddModDebounce{seq: seq}
+		}))
+	}
 	return a, cmd
+}
+
+// searchAddMod fires the live search for the popup's current query.
+func (a *App) searchAddMod() tea.Cmd {
+	q := strings.TrimSpace(a.addModInput.Value())
+	a.addModQuery = q
+	a.addModErr = ""
+	if q == "" {
+		a.addModHits = nil
+		a.addModIdx = 0
+		a.addModSearching = false
+		return nil
+	}
+	a.addModSearching = true
+	seq := a.addModSeq
+	mc, loader := a.packMeta.Minecraft, a.packMeta.Loader
+	return func() tea.Msg {
+		hits, err := SearchBothSources(q, mc, loader, 10)
+		return msgAddModResults{seq: seq, hits: hits, err: err}
+	}
+}
+
+// addModPaneWidths mirrors viewAddModModal's geometry so image sizing and
+// rendering agree: a slim list column, the rest to the preview. rw is 0 in
+// the narrow single-column layout (no preview, no images).
+func (a *App) addModPaneWidths() (lw, rw int) {
+	w := clamp(a.width-8, 46, 130)
+	fw, _ := styleModal.GetFrameSize()
+	cw := w - fw
+	if cw < 72 {
+		return cw, 0
+	}
+	lw = clamp(cw/3, 24, 34)
+	return lw, cw - lw - 3
+}
+
+// addModLogoSize is the preview logo's cell budget: small beside the title
+// under kitty graphics (full-res anyway). Half-block art gets as many cells
+// as the pane affords — every cell is a pixel — but stays compact when a
+// screenshot needs the vertical space too.
+func (a *App) addModLogoSize(rw int, hasShot bool) (cols, rows int) {
+	if kittyGraphicsOK() {
+		return 8, 4
+	}
+	c := clamp(rw*2/3, 16, 44)
+	if hasShot {
+		c = clamp(rw/4, 14, 24)
+	}
+	return c, c / 2
+}
+
+// addModImageCmds queues fetches for every image the popup currently wants:
+// the selected hit's logo and first screenshot, plus (kitty graphics only)
+// the row icons for the whole result list. Each key is fetched once per
+// session; the bytes are disk-cached besides.
+func (a *App) addModImageCmds() tea.Cmd {
+	_, rw := a.addModPaneWidths()
+	if !terminalDoesColor() || rw <= 0 {
+		return nil
+	}
+	kitty := kittyGraphicsOK()
+	if a.addModImgs == nil {
+		a.addModImgs = map[string]string{}
+	}
+	var cmds []tea.Cmd
+	fetch := func(u string, maxCols, maxRows int) {
+		if u == "" || maxCols < 1 || maxRows < 1 {
+			return
+		}
+		key := imgKey(u, maxCols, maxRows)
+		if _, started := a.addModImgs[key]; started {
+			return
+		}
+		a.addModImgs[key] = pendingImg
+		id := 0
+		if kitty {
+			a.kittyImgSeq++
+			id = kittyIDBase + a.kittyImgSeq
+		}
+		cmds = append(cmds, func() tea.Msg {
+			block, err := fetchImageBlock(u, maxCols, maxRows, id)
+			if err != nil {
+				block = "" // remembered as failed so we don't refetch every keypress
+			}
+			return msgAddModImg{key: key, block: block}
+		})
+	}
+	if a.addModIdx < len(a.addModHits) {
+		hit := a.addModHits[a.addModIdx]
+		lc, lr := a.addModLogoSize(rw, len(hit.Gallery) > 0)
+		fetch(hit.IconURL, lc, lr)
+		// Fetch gallery images one at a time from the page start —
+		// msgAddModImg re-runs this, so the page fills until both its rows
+		// are out of room.
+		if len(hit.Gallery) > 0 {
+			fetch(hit.Gallery[clamp(a.addModShotIdx, 0, len(hit.Gallery)-1)], rw-2, 14)
+			_, end, shotRows, full := a.addModShotWindow(hit, rw)
+			if len(shotRows) > 0 && !full && end < len(hit.Gallery) {
+				fetch(hit.Gallery[end], rw-2, 14)
+			}
+		}
+	}
+	if kitty {
+		for _, h := range a.addModHits {
+			fetch(h.IconURL, 2, 1)
+		}
+	}
+	return tea.Batch(cmds...)
+}
+
+// activateAddModButton runs the focused preview button (keyboard enter or a
+// click on its box) — exact ids, so packwiz doesn't need to disambiguate.
+// The query and results are kept so the reopened popup is ready for the
+// next add.
+func (a *App) activateAddModButton() (tea.Model, tea.Cmd) {
+	if a.addModIdx >= len(a.addModHits) {
+		return a, nil
+	}
+	hit := a.addModHits[a.addModIdx]
+	btns := addModButtons(hit)
+	btn := btns[clamp(a.addModBtnIdx, 0, len(btns)-1)]
+	ref := hit.Refs[btn.source]
+	if !btn.install {
+		pageURL := "https://modrinth.com/mod/" + ref.Slug
+		if btn.source == "curseforge" {
+			pageURL = "https://www.curseforge.com/minecraft/mc-mods/" + ref.Slug
+		}
+		go exec.Command("xdg-open", pageURL).Start()
+		a.statusMsg = "Opening " + pageURL
+		a.statusIsErr = false
+		a.statusExpire = time.Now().Add(3 * time.Second)
+		return a, a.expireStatus()
+	}
+	a.addModModal = false
+	a.returnToAddModal = true
+	a.startOutput()
+	if btn.source == "curseforge" {
+		return a, a.runPackwiz("curseforge", "add", "--addon-id", ref.ProjectID, "-y")
+	}
+	return a, a.runPackwiz("modrinth", "add", "--project-id", ref.ProjectID, "-y")
+}
+
+// addModShotWindow returns the gallery page at the current pagination
+// offset: whole images packed left to right (2-cell gaps) into one row.
+// shotRows holds the gallery indices per displayed row; end is one past the
+// last packed image; full reports the page stopped because the row was out
+// of room (as opposed to running out of fetched images — unknown-size
+// images end the page until their fetch lands).
+func (a *App) addModShotWindow(hit ModHit, rw int) (start, end int, shotRows [][]int, full bool) {
+	start = clamp(a.addModShotIdx, 0, len(hit.Gallery)-1)
+	avail := rw - 2
+	var cur []int
+	curW := 0
+	for k := start; k < len(hit.Gallery); k++ {
+		block := a.addModImgs[imgKey(hit.Gallery[k], rw-2, 14)]
+		if block == "" || block == pendingImg {
+			break
+		}
+		w := lipgloss.Width(strings.Split(block, "\n")[0])
+		gap := 0
+		if len(cur) > 0 {
+			gap = 2
+		}
+		if curW+gap+w > avail {
+			full = true
+			break
+		}
+		cur = append(cur, k)
+		curW += gap + w
+	}
+	if len(cur) > 0 {
+		shotRows = append(shotRows, cur)
+		end = cur[len(cur)-1] + 1
+	} else {
+		end = start + 1 // the current slot always shows (spinner while loading)
+	}
+	return start, end, shotRows, full
+}
+
+// addModShotMove paginates the gallery window. Left slides back one image;
+// right advances to the nearest window that reveals an image not currently
+// on screen — a window that only re-shows visible images is skipped (three
+// images where 1+2 fit together page [1,2] → [3], not [1,2] → [2]).
+func (a *App) addModShotMove(dir int) tea.Cmd {
+	if a.addModIdx >= len(a.addModHits) {
+		return nil
+	}
+	hit := a.addModHits[a.addModIdx]
+	if len(hit.Gallery) < 2 {
+		return nil
+	}
+	_, rw := a.addModPaneWidths()
+	oldStart, oldEnd, _, _ := a.addModShotWindow(hit, rw)
+	a.addModPrevScroll = 0
+	if dir < 0 {
+		a.addModShotIdx = maxInt(0, oldStart-1)
+		return a.addModImageCmds()
+	}
+	if oldEnd >= len(hit.Gallery) {
+		return nil // the last image is already visible
+	}
+	for s := oldStart + 1; s < len(hit.Gallery); s++ {
+		a.addModShotIdx = s
+		_, e, _, full := a.addModShotWindow(hit, rw)
+		if e > oldEnd {
+			break
+		}
+		// An unknown-size image ends pages early — stop here and let its
+		// fetch extend the page instead of skipping past it.
+		if !full && e < len(hit.Gallery) {
+			if block, known := a.addModImgs[imgKey(hit.Gallery[e], rw-2, 14)]; !known || block == pendingImg {
+				break
+			}
+		}
+	}
+	return a.addModImageCmds()
+}
+
+// addModBtn is one action button in the popup's preview pane.
+type addModBtn struct {
+	label   string
+	source  string
+	install bool
+}
+
+// addModButtons builds the preview's action buttons for a hit: an install
+// and an open-page button per platform hosting it, grouped by platform.
+func addModButtons(h ModHit) []addModBtn {
+	var btns []addModBtn
+	for _, s := range h.Sources() {
+		btns = append(btns,
+			addModBtn{label: "⇩ install", source: s, install: true},
+			addModBtn{label: "↗ website", source: s})
+	}
+	return btns
+}
+
+// closeAddModModal dismisses the popup and clears its search state.
+func (a *App) closeAddModModal() {
+	a.addModModal = false
+	a.addModInput.SetValue("")
+	a.addModInput.Blur()
+	a.addModHits = nil
+	a.addModIdx = 0
+	a.addModBtnIdx, a.addModShotIdx, a.addModPrevScroll = 0, 0, 0
+	a.addModQuery = ""
+	a.addModErr = ""
+	a.addModSearching = false
+	a.addModSeq++ // orphan any in-flight search
 }
 
 func (a *App) updateManageMods(msg tea.Msg) (tea.Model, tea.Cmd) {

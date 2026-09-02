@@ -37,23 +37,45 @@ func TestHomeStylePurity(t *testing.T) {
 	}
 }
 
+// Kitty placeholder rows must measure exactly their cell count under the
+// width functions lipgloss/bubbletea use — a mismatch shifts everything
+// rendered after an image (regression: high-index column diacritics measure
+// width 1 in go-runewidth though terminals render them zero-width).
+func TestKittyPlaceholderWidth(t *testing.T) {
+	for _, size := range [][2]int{{1, 2}, {5, 10}, {14, 85}, {30, 200}} {
+		block := kittyPlaceholderBlock(70123, size[0], size[1])
+		for i, l := range strings.Split(block, "\n") {
+			if w := lipgloss.Width(l); w != size[1] {
+				t.Errorf("%dx%d row %d: lipgloss.Width=%d, want %d", size[0], size[1], i, w, size[1])
+			}
+		}
+	}
+}
+
 // The add-mod modal must overlay as a popup: full-width lines, background
 // visible around it.
 func TestHomeModalOverlay(t *testing.T) {
 	a := testApp(160, 40)
 	a.setHomeFocus(0)
 	a.addModModal = true
+	a.addModQuery = "sodium"
+	a.addModHits = []ModHit{
+		{Source: "modrinth", Slug: "sodium", Title: "Sodium", Description: "A high-performance rendering engine replacement", Downloads: 218e6, ProjectID: "AANobbMI"},
+		{Source: "curseforge", Slug: "jei", Title: "Just Enough Items", Description: "View items and recipes", Downloads: 617e6, ProjectID: "238222"},
+	}
 	body := a.viewHome()
-	if !strings.Contains(body, "Add Mod from Modrinth") {
-		t.Fatalf("modal not rendered")
+	for _, want := range []string{"◈ Add Mod", "sodium", "jei", "2 results", "218.0M"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("modal missing %q", want)
+		}
 	}
 	for i, l := range strings.Split(body, "\n") {
 		if lipgloss.Width(l) > a.width {
 			t.Errorf("modal overlay line %d overflows (%d > %d)", i, lipgloss.Width(l), a.width)
 		}
 	}
-	// A mod row on the same line as the modal should still be visible.
-	if !strings.Contains(body, "some-fairly-long-mod-name-2") {
+	// The background must stay visible around the near-fullscreen popup.
+	if !strings.Contains(body, "some-fa") {
 		t.Errorf("background wiped by modal overlay")
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -29,6 +30,12 @@ commands:
   test full          server + real headless client (gamescope), soak, screenshots
   tag-sides <zip>    set side=client/both on all mods by diffing a server-pack zip
   fix-sources        swap CurseForge-API-blocked mods to Modrinth (byte-identical files)
+  search <query>     search Modrinth + CurseForge for mods matching this pack's
+                     mc version/loader. Flags: --source modrinth|curseforge|all,
+                     --limit N, --any-version (drop the version/loader filter)
+  mod-info <slug>    project details + installable versions for this pack, with
+                     the exact packwiz command to install a specific one.
+                     Flags: --source, --limit, --any-version as above
   convert-sources <target>
                      convert every mod to modrinth (byte-identical, sha1) or
                      curseforge (by slug, rolled back if not found)
@@ -56,6 +63,22 @@ flags for test:
   --port N           server port (default 25565)
   --rcon-port N      rcon port (default 25575)
 `)
+}
+
+// parseFlagsAnywhere parses fs against args, allowing flags to appear after
+// positionals (`search sodium --limit 3` — the natural order for agents);
+// returns the positional args in order.
+func parseFlagsAnywhere(fs *flag.FlagSet, args []string) []string {
+	var pos []string
+	for {
+		fs.Parse(args)
+		rest := fs.Args()
+		if len(rest) == 0 {
+			return pos
+		}
+		pos = append(pos, rest[0])
+		args = rest[1:]
+	}
 }
 
 // RunCLI handles subcommands; returns false if none was given (start the TUI).
@@ -147,6 +170,38 @@ func RunCLI(args []string) (handled bool, exitCode int) {
 		report, err := FixModSources(findPack(), *side)
 		fmt.Print(report)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "FAILED: %v\n", err)
+			return true, 1
+		}
+		return true, 0
+
+	case "search":
+		fs := flag.NewFlagSet("search", flag.ExitOnError)
+		source := fs.String("source", "all", "modrinth|curseforge|all")
+		limit := fs.Int("limit", 8, "results per source")
+		anyVersion := fs.Bool("any-version", false, "don't filter by the pack's mc version/loader")
+		query := strings.TrimSpace(strings.Join(parseFlagsAnywhere(fs, args[1:]), " "))
+		if query == "" {
+			fmt.Fprintln(os.Stderr, "usage: packwiz-tui search [flags] <query>")
+			return true, 1
+		}
+		if err := CLISearch(findPack(), *source, query, *limit, *anyVersion, os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "FAILED: %v\n", err)
+			return true, 1
+		}
+		return true, 0
+
+	case "mod-info":
+		fs := flag.NewFlagSet("mod-info", flag.ExitOnError)
+		source := fs.String("source", "", "modrinth|curseforge (default: modrinth, then curseforge)")
+		limit := fs.Int("limit", 10, "max versions listed")
+		anyVersion := fs.Bool("any-version", false, "don't filter by the pack's mc version/loader")
+		pos := parseFlagsAnywhere(fs, args[1:])
+		if len(pos) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: packwiz-tui mod-info [flags] <slug>")
+			return true, 1
+		}
+		if err := CLIModInfo(findPack(), *source, pos[0], *limit, *anyVersion, os.Stdout); err != nil {
 			fmt.Fprintf(os.Stderr, "FAILED: %v\n", err)
 			return true, 1
 		}
@@ -251,6 +306,11 @@ func RunCLI(args []string) (handled bool, exitCode int) {
 		}
 		return true, 0
 
+	case "img-test":
+		// Hidden diagnostic: check terminal image alignment outside the TUI.
+		RunImgTest()
+		return true, 0
+
 	case "mcp-approve":
 		// Internal: MCP permission-prompt server for the embedded agent chat.
 		if len(args) < 2 {
@@ -263,7 +323,7 @@ func RunCLI(args []string) (handled bool, exitCode int) {
 		return true, 0
 
 	case "agent":
-		c, err := agentCommand(findPack())
+		c, err := agentCommand(findPack(), 0)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "agent not found: %v\n", err)
 			return true, 1

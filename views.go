@@ -1198,24 +1198,454 @@ func (a *App) viewManageMods() string {
 	return lipgloss.Place(a.width, a.height-1, lipgloss.Center, lipgloss.Top, content)
 }
 
+// Source tags in the add-mod popup wear their platform's brand colour.
+var (
+	styleTagModrinth   = lipgloss.NewStyle().Foreground(lipgloss.Color("#1bd96a")).Bold(true)
+	styleTagCurseforge = lipgloss.NewStyle().Foreground(lipgloss.Color("#f16436")).Bold(true)
+)
+
+// hitSourceTags renders a hit's source badges — every platform hosting the
+// mod, primary first. wide=false gives the two-letter list form ("mr cf"),
+// wide=true the full names. Returns the styled string and its cell width.
+func hitSourceTags(h ModHit, wide bool) (string, int) {
+	var parts []string
+	width := 0
+	for _, s := range h.Sources() {
+		label, st := "mr", styleTagModrinth
+		if s == "curseforge" {
+			label, st = "cf", styleTagCurseforge
+		}
+		if wide {
+			label = s
+		}
+		if width > 0 {
+			width++ // joining space
+		}
+		parts = append(parts, st.Render(label))
+		width += len(label)
+	}
+	return strings.Join(parts, " "), width
+}
+
+// viewAddModModal renders the near-fullscreen add-mod popup: the query input
+// with the live results list beneath it in a slim left column, and a large
+// preview of the selected mod on the right — logo, brand-tagged sources,
+// downloads, first screenshot, description. Images use kitty graphics where
+// the terminal supports them, half-block pixel art (sized to the pane, so a
+// bigger pane means more resolution) elsewhere, nothing on no-color
+// terminals. Narrow terminals get the list only, no preview.
 func (a *App) viewAddModModal() string {
-	title := "◈ Add Mod from Modrinth"
-	subtitle := "Enter a mod slug or name"
-	hint := "enter to add  ·  esc to cancel"
+	h := clamp(a.height-4, 14, 40)
+	_, fh := styleModal.GetFrameSize()
+	ch := h - fh
+	lw, rw := a.addModPaneWidths()
+	twoCol := rw > 0
+	cw := lw
 
-	// Use muted style without padding for modal text
-	modalText := lipgloss.NewStyle().Foreground(colorMuted)
+	muted := lipgloss.NewStyle().Foreground(colorMuted)
+	danger := lipgloss.NewStyle().Foreground(colorDanger)
+	color := terminalDoesColor()
+	kitty := color && kittyGraphicsOK()
+	a.addModInput.Width = maxInt(10, lw-4)
 
-	content := lipgloss.JoinVertical(lipgloss.Left,
-		styleModalTitle.Render(title),
-		"",
-		modalText.Render(subtitle),
-		"",
-		a.addModInput.View(),
-		"",
-		modalText.Render(hint),
-	)
-	return styleModal.Render(content)
+	// The overlay centres the popup (renderWithModal) — mirror that math so
+	// click zones land on the real screen cells.
+	fwFull, fhFull := styleModal.GetFrameSize()
+	contentX := maxInt(0, (a.width-(cw+fwFull))/2) + fwFull/2
+	contentY := maxInt(0, (a.height-1-(ch+fhFull))/2) + fhFull/2
+	if twoCol {
+		contentX = maxInt(0, (a.width-(lw+3+rw+fwFull))/2) + fwFull/2
+	}
+	zone := func(x, y, w, h int, action string) {
+		a.clickZones = append(a.clickZones, clickZone{
+			x: contentX + x, y: contentY + y, w: w, h: h, action: action,
+		})
+	}
+
+	// Result rows: real-image icon (kitty only — no indent when the terminal
+	// can't place images), slug, brand-coloured source tags.
+	renderRows := func(width, height, baseRow int) []string {
+		iconW := 0
+		if kitty {
+			iconW = 3
+		}
+		var rows []string
+		start, end := visibleWindow(a.addModIdx, len(a.addModHits), height)
+		for i := start; i < end; i++ {
+			hit := a.addModHits[i]
+			tags, tagW := hitSourceTags(hit, false)
+			prefix := ""
+			if kitty {
+				if block, ok := a.addModImgs[imgKey(hit.IconURL, 2, 1)]; ok && block != "" && block != pendingImg {
+					prefix = block + " "
+				} else {
+					prefix = strings.Repeat(" ", iconW)
+				}
+			}
+			// styleModItem* carry one column of left padding.
+			textW := width - iconW - 1
+			name := truncate(hit.Slug, maxInt(8, textW-tagW-2))
+			pad := maxInt(1, textW-lipgloss.Width(name)-tagW)
+			st := styleModItem
+			if i == a.addModIdx {
+				st = styleModItemSelected
+			}
+			zone(0, baseRow+len(rows), width, 1, fmt.Sprintf("addmod:row:%d", i))
+			rows = append(rows, prefix+st.Render(name)+strings.Repeat(" ", pad-1)+tags)
+		}
+		return rows
+	}
+
+	statusLine := func(width int) string {
+		switch {
+		case a.addModSearching:
+			return muted.Render(spinnerFrames[a.spinFrame] + " searching…")
+		case a.addModErr != "":
+			return danger.Render(truncate("error: "+a.addModErr, width))
+		case a.addModQuery == "":
+			return muted.Render("results appear as you type")
+		case len(a.addModHits) == 0:
+			return muted.Render(truncate("no results for "+a.addModQuery, width))
+		default:
+			return muted.Render(fmt.Sprintf("%d results", len(a.addModHits)))
+		}
+	}
+
+	scope := strings.TrimSpace(a.packMeta.Minecraft + " " + a.packMeta.Loader)
+	if scope == "" {
+		scope = "all versions"
+	}
+	hint := muted.Render(truncate("↑/↓ select · ←/→ buttons · enter go · esc close", lw))
+
+	if !twoCol {
+		var lines []string
+		lines = append(lines, styleModalTitle.Render("◈ Add Mod"))
+		lines = append(lines, muted.Render(truncate("Modrinth + CurseForge · "+scope, cw)))
+		lines = append(lines, a.addModInput.View())
+		lines = append(lines, statusLine(cw))
+		lines = append(lines, renderRows(cw, maxInt(1, ch-len(lines)-1), len(lines))...)
+		for len(lines) < ch-1 {
+			lines = append(lines, "")
+		}
+		lines = append(lines[:ch-1], hint)
+		return styleModal.Render(strings.Join(lines, "\n"))
+	}
+
+	// ── Left column: query input with the results list beneath it ──
+	var left []string
+	left = append(left, styleModalTitle.Render("◈ Add Mod"))
+	left = append(left, muted.Render(truncate("Modrinth + CurseForge · "+scope, lw)))
+	left = append(left, "")
+	left = append(left, a.addModInput.View())
+	left = append(left, statusLine(lw))
+	left = append(left, "")
+	left = append(left, renderRows(lw, maxInt(1, ch-len(left)-1), len(left))...)
+	for len(left) < ch-1 {
+		left = append(left, "")
+	}
+	left = append(left[:ch-1], hint)
+
+	// ── Right column: large preview of the selected mod — a scrollable
+	// column (wheel / pgup·pgdn) so the description is never cut off. Click
+	// zones are collected content-relative and registered after scrolling.
+	var prev []string
+	var pzones []addModZone
+	center := func(l string) string {
+		off := maxInt(0, (rw-lipgloss.Width(l))/2)
+		return strings.Repeat(" ", off) + l
+	}
+	if a.addModIdx < len(a.addModHits) {
+		hit := a.addModHits[a.addModIdx]
+		lc, lr := a.addModLogoSize(rw, len(hit.Gallery) > 0)
+		logo := ""
+		if color && hit.IconURL != "" {
+			logo = a.addModImgs[imgKey(hit.IconURL, lc, lr)]
+		}
+		logoOK := logo != "" && logo != pendingImg
+		tags, _ := hitSourceTags(hit, true)
+		titleLine := styleModalTitle.Render(truncate(hit.Title, rw))
+		dlLine := tags + muted.Render(" · "+humanCount(hit.Downloads)+" downloads")
+		if lipgloss.Width(dlLine) > rw {
+			dlLine = tags
+		}
+		switch {
+		case kitty && logoOK:
+			// Small full-res logo beside the title block.
+			logoLines := strings.Split(logo, "\n")
+			logoW := lc
+			textW := maxInt(8, rw-logoW-2)
+			titleLine = styleModalTitle.Render(truncate(hit.Title, textW))
+			if lipgloss.Width(dlLine) > textW {
+				dlLine = tags
+			}
+			text := []string{titleLine, dlLine}
+			for i := 0; i < maxInt(len(logoLines), len(text)); i++ {
+				lpart := strings.Repeat(" ", logoW)
+				if i < len(logoLines) {
+					lpart = logoLines[i]
+					if pad := logoW - lipgloss.Width(lpart); pad > 0 {
+						lpart += strings.Repeat(" ", pad)
+					}
+				}
+				tpart := ""
+				if i < len(text) {
+					tpart = text[i]
+				}
+				prev = append(prev, lpart+"  "+tpart)
+			}
+		case logoOK:
+			// Big half-block logo — the pane's width is its resolution.
+			for _, l := range strings.Split(logo, "\n") {
+				prev = append(prev, center(l))
+			}
+			prev = append(prev, "")
+			prev = append(prev, center(titleLine))
+			prev = append(prev, center(dlLine))
+		default:
+			if color && logo == pendingImg {
+				prev = append(prev, center(muted.Render(spinnerFrames[a.spinFrame])))
+			}
+			prev = append(prev, center(titleLine))
+			prev = append(prev, center(dlLine))
+		}
+		// Gallery page: whole screenshots packed into up to two wrapped
+		// rows, paginated with shift+←/→ or the ‹ › arrows.
+		if color && len(hit.Gallery) > 0 {
+			start, end, shotRows, _ := a.addModShotWindow(hit, rw)
+			prev = append(prev, "")
+			if len(shotRows) == 0 {
+				prev = append(prev, center(muted.Render(spinnerFrames[a.spinFrame]+" loading screenshot…")))
+			}
+			for ri, rowIdx := range shotRows {
+				if ri > 0 {
+					prev = append(prev, "")
+				}
+				var blocks [][]string
+				var widths []int
+				maxH := 0
+				for _, k := range rowIdx {
+					b := strings.Split(a.addModImgs[imgKey(hit.Gallery[k], rw-2, 14)], "\n")
+					blocks = append(blocks, b)
+					widths = append(widths, lipgloss.Width(b[0]))
+					maxH = maxInt(maxH, len(b))
+				}
+				for r := 0; r < maxH; r++ {
+					row := ""
+					for bi, b := range blocks {
+						if bi > 0 {
+							row += "  "
+						}
+						voff := (maxH - len(b)) / 2
+						if r >= voff && r-voff < len(b) {
+							row += b[r-voff]
+						} else {
+							row += strings.Repeat(" ", widths[bi])
+						}
+					}
+					prev = append(prev, center(row))
+				}
+			}
+			if len(hit.Gallery) > 1 {
+				label := fmt.Sprintf("screenshot %d/%d", start+1, len(hit.Gallery))
+				if end-start > 1 {
+					label = fmt.Sprintf("screenshots %d-%d/%d", start+1, end, len(hit.Gallery))
+				}
+				// Clickable ‹ › pagination arrows flank the caption, dimmed
+				// at their respective ends of the gallery.
+				arrow := func(sym string, active bool) string {
+					if active {
+						return styleSearchActive.Render(" " + sym + " ")
+					}
+					return muted.Render(" " + sym + " ")
+				}
+				line := arrow("‹", start > 0) + muted.Render(label) + arrow("›", end < len(hit.Gallery))
+				off := maxInt(0, (rw-lipgloss.Width(line))/2)
+				pzones = append(pzones,
+					addModZone{x: off, row: len(prev), w: 3, h: 1, action: "addmod:shotprev"},
+					addModZone{x: off + lipgloss.Width(line) - 3, row: len(prev), w: 3, h: 1, action: "addmod:shotnext"})
+				prev = append(prev, strings.Repeat(" ", off)+line)
+			}
+		}
+		// Full description — never cut off; the pane scrolls instead.
+		prev = append(prev, "")
+		for _, l := range wrapText(hit.Description, rw) {
+			prev = append(prev, l)
+		}
+		// Buttons: pinned to the pane's bottom when everything fits, else
+		// the last section of the scrollable content.
+		btnLines, btnZones := a.renderAddModButtons(hit, rw)
+		if len(prev)+1+len(btnLines) <= ch {
+			for len(prev) < ch-len(btnLines) {
+				prev = append(prev, "")
+			}
+		} else {
+			prev = append(prev, "")
+		}
+		base := len(prev)
+		prev = append(prev, btnLines...)
+		for _, z := range btnZones {
+			pzones = append(pzones, addModZone{x: z.x, row: base + z.row, w: z.w, h: z.h, action: z.action})
+		}
+	} else {
+		for len(prev) < ch/2-1 {
+			prev = append(prev, "")
+		}
+		prev = append(prev, center(muted.Render("mod preview")))
+		prev = append(prev, center(muted.Render("appears here as you search")))
+	}
+
+	// Scroll the preview, then register the zones still on screen.
+	a.addModPrevScroll = clamp(a.addModPrevScroll, 0, maxInt(0, len(prev)-ch))
+	sc := a.addModPrevScroll
+	prev = prev[sc:minInt(len(prev), sc+ch)]
+	for _, z := range pzones {
+		if z.row-sc >= 0 && z.row-sc < ch {
+			zone(lw+3+z.x, z.row-sc, z.w, z.h, z.action)
+		}
+	}
+	for len(prev) < ch {
+		prev = append(prev, "")
+	}
+
+	// Fixed geometry: every line is padded to its pane's exact width, so the
+	// popup never resizes (and never re-centres) as content changes.
+	sep := muted.Render(" │ ")
+	merged := make([]string, ch)
+	for i := 0; i < ch; i++ {
+		l := left[i]
+		if pad := lw - lipgloss.Width(l); pad > 0 {
+			l += strings.Repeat(" ", pad)
+		}
+		r := prev[i]
+		if pad := rw - lipgloss.Width(r); pad > 0 {
+			r += strings.Repeat(" ", pad)
+		}
+		merged[i] = l + sep + r
+	}
+	return styleModal.Render(strings.Join(merged, "\n"))
+}
+
+// addModZone is a clickable area relative to the button block's first line.
+type addModZone struct {
+	x, row, w, h int
+	action       string
+}
+
+// renderAddModButtons renders the preview's action buttons: for each
+// platform hosting the mod, its name (brand-coloured) centred above a row of
+// bordered boxes — install and website — so they're comfortable touch
+// targets. Platform groups sit side by side when the pane is wide enough,
+// stacked otherwise. ←/→ moves focus, enter or a click activates.
+func (a *App) renderAddModButtons(hit ModHit, rw int) ([]string, []addModZone) {
+	btns := addModButtons(hit)
+	focused := clamp(a.addModBtnIdx, 0, len(btns)-1)
+
+	// Build each platform's group: a centred label row over its box row.
+	type btnGroup struct {
+		lines []string
+		width int
+		zones []addModZone // relative to the group's own origin
+	}
+	var groups []btnGroup
+	for i := 0; i < len(btns); i += 2 {
+		nameStyle := styleTagModrinth
+		if btns[i].source == "curseforge" {
+			nameStyle = styleTagCurseforge
+		}
+		var boxes [][]string
+		var widths []int
+		total := 0
+		for j := i; j < minInt(i+2, len(btns)); j++ {
+			border := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).
+				BorderForeground(colorBorder).Padding(0, 1)
+			label := lipgloss.NewStyle().Foreground(colorText)
+			if j == focused {
+				border = border.BorderForeground(colorAccent)
+				label = lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
+			}
+			box := strings.Split(border.Render(label.Render(btns[j].label)), "\n")
+			boxes = append(boxes, box)
+			widths = append(widths, lipgloss.Width(box[0]))
+			total += lipgloss.Width(box[0])
+		}
+		total += len(boxes) - 1
+		g := btnGroup{width: total}
+		labelPad := maxInt(0, (total-len(btns[i].source))/2)
+		g.lines = append(g.lines, strings.Repeat(" ", labelPad)+nameStyle.Render(btns[i].source))
+		for r := 0; r < len(boxes[0]); r++ {
+			row := ""
+			for bi, box := range boxes {
+				if bi > 0 {
+					row += " "
+				}
+				row += box[r]
+			}
+			g.lines = append(g.lines, row)
+		}
+		x := 0
+		for bi := range boxes {
+			g.zones = append(g.zones, addModZone{
+				x: x, row: 1, w: widths[bi], h: len(boxes[bi]),
+				action: fmt.Sprintf("addmod:btn:%d", i+bi),
+			})
+			x += widths[bi] + 1
+		}
+		groups = append(groups, g)
+	}
+
+	pad := func(l string, w int) string {
+		if gap := w - lipgloss.Width(l); gap > 0 {
+			return l + strings.Repeat(" ", gap)
+		}
+		return l
+	}
+
+	// Side by side when they fit, stacked otherwise.
+	const gap = 3
+	total := gap * (len(groups) - 1)
+	rows := 0
+	for _, g := range groups {
+		total += g.width
+		rows = maxInt(rows, len(g.lines))
+	}
+	var lines []string
+	var zones []addModZone
+	if total <= rw && len(groups) > 1 {
+		off := maxInt(0, (rw-total)/2)
+		for r := 0; r < rows; r++ {
+			row := strings.Repeat(" ", off)
+			for gi, g := range groups {
+				if gi > 0 {
+					row += strings.Repeat(" ", gap)
+				}
+				l := ""
+				if r < len(g.lines) {
+					l = g.lines[r]
+				}
+				row += pad(l, g.width)
+			}
+			lines = append(lines, row)
+		}
+		x := off
+		for _, g := range groups {
+			for _, z := range g.zones {
+				zones = append(zones, addModZone{x: x + z.x, row: z.row, w: z.w, h: z.h, action: z.action})
+			}
+			x += g.width + gap
+		}
+	} else {
+		for _, g := range groups {
+			off := maxInt(0, (rw-g.width)/2)
+			base := len(lines)
+			for _, l := range g.lines {
+				lines = append(lines, strings.Repeat(" ", off)+l)
+			}
+			for _, z := range g.zones {
+				zones = append(zones, addModZone{x: off + z.x, row: base + z.row, w: z.w, h: z.h, action: z.action})
+			}
+		}
+	}
+	return lines, zones
 }
 
 // renderWithModal overlays a modal centred on top of bg.
