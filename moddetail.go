@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -233,21 +232,16 @@ func fetchModVersions(slug, cacheKey, projID string, meta PackMeta) tea.Cmd {
 		if enc := q.Encode(); enc != "" {
 			u += "?" + enc
 		}
-		client := &http.Client{Timeout: 15 * time.Second}
-		resp, err := client.Get(u)
+		data, err := cachedGET(u, nil)
 		if err != nil {
 			return msgModVersions{slug: slug, key: cacheKey, err: err}
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != 200 {
-			return msgModVersions{slug: slug, key: cacheKey, err: fmt.Errorf("modrinth API returned %d", resp.StatusCode)}
 		}
 		var raw []struct {
 			ID     string `json:"id"`
 			Number string `json:"version_number"`
 			Name   string `json:"name"`
 		}
-		if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		if err := json.Unmarshal(data, &raw); err != nil {
 			return msgModVersions{slug: slug, key: cacheKey, err: err}
 		}
 		if len(raw) > 20 {
@@ -266,14 +260,9 @@ func fetchModVersions(slug, cacheKey, projID string, meta PackMeta) tea.Cmd {
 // mc version and loader.
 func fetchCurseforgeVersions(slug, cacheKey, projID string, meta PackMeta) tea.Cmd {
 	return func() tea.Msg {
-		client := &http.Client{Timeout: 20 * time.Second}
-		resp, err := client.Get("https://api.cfwidget.com/" + projID)
+		data, err := cachedGET("https://api.cfwidget.com/"+projID, nil)
 		if err != nil {
 			return msgModVersions{slug: slug, key: cacheKey, err: err}
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != 200 {
-			return msgModVersions{slug: slug, key: cacheKey, err: fmt.Errorf("cfwidget returned %d", resp.StatusCode)}
 		}
 		var raw struct {
 			Files []struct {
@@ -282,7 +271,7 @@ func fetchCurseforgeVersions(slug, cacheKey, projID string, meta PackMeta) tea.C
 				Versions []string `json:"versions"`
 			} `json:"files"`
 		}
-		if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		if err := json.Unmarshal(data, &raw); err != nil {
 			return msgModVersions{slug: slug, key: cacheKey, err: err}
 		}
 		matches := func(tags []string, want string) bool {
@@ -316,19 +305,14 @@ func fetchCurseforgeVersions(slug, cacheKey, projID string, meta PackMeta) tea.C
 // modrinth hash endpoint.
 func fetchCurVersionByHash(slug, sha1v string) tea.Cmd {
 	return func() tea.Msg {
-		client := &http.Client{Timeout: 15 * time.Second}
-		resp, err := client.Get("https://api.modrinth.com/v2/version_file/" + sha1v + "?algorithm=sha1")
+		data, err := cachedGET("https://api.modrinth.com/v2/version_file/"+sha1v+"?algorithm=sha1", nil)
 		if err != nil {
-			return msgModCurVer{slug: slug, sha1: sha1v}
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != 200 {
 			return msgModCurVer{slug: slug, sha1: sha1v}
 		}
 		var v struct {
 			Number string `json:"version_number"`
 		}
-		if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+		if err := json.Unmarshal(data, &v); err != nil {
 			return msgModCurVer{slug: slug, sha1: sha1v}
 		}
 		return msgModCurVer{slug: slug, sha1: sha1v, number: v.Number}

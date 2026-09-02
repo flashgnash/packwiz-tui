@@ -39,8 +39,10 @@ func LoadConfig() Config {
 // agentCommand builds the agent process, run from the pack directory so the
 // agent sees the pack (and its CLAUDE.md etc) as its working context. The
 // agent gets packwiz-tui itself on PATH and a CLAUDE.md section documenting
-// the tooling, so it can run the tests and fixers on its own.
-func agentCommand(packDir string) (*exec.Cmd, error) {
+// the tooling, so it can run the tests and fixers on its own. mode carries
+// the TUI's permission toggle (0 ASK, 1 AUTO, 2 YOLO) into the interactive
+// session, same as agentChatCmd does for headless turns.
+func agentCommand(packDir string, mode int) (*exec.Cmd, error) {
 	cfg := LoadConfig()
 	parts := strings.Fields(cfg.Agent)
 	if _, err := exec.LookPath(parts[0]); err != nil {
@@ -48,7 +50,14 @@ func agentCommand(packDir string) (*exec.Cmd, error) {
 	}
 	ensureAgentContext(packDir)
 	ensureAgentSettings(packDir)
-	c := exec.Command(parts[0], parts[1:]...)
+	args := append([]string{}, parts[1:]...)
+	switch mode {
+	case 1:
+		args = append(args, "--permission-mode", "acceptEdits")
+	case 2:
+		args = append(args, "--dangerously-skip-permissions")
+	}
+	c := exec.Command(parts[0], args...)
 	c.Dir = packDir
 	c.Env = agentEnv()
 	return c, nil
@@ -81,6 +90,8 @@ This pack is managed with packwiz-tui, which is on PATH here. Useful commands
 
 - ` + "`packwiz-tui test server`" + ` — install + boot this pack's server, verify it reaches "Done", sample TPS over RCON. Fails with log paths on crash.
 - ` + "`packwiz-tui test full [--soak 90s]`" + ` — the above plus a real headless client (gamescope + portablemc, offline account) that auto-joins, soaks in spectator, samples TPS, and saves screenshots to ` + "`.packwiz-tui/last-test/`" + ` — read those screenshots to check for visual problems.
+- ` + "`packwiz-tui search <query> [--source modrinth|curseforge] [--any-version]`" + ` — search both mod APIs, filtered to this pack's mc version/loader, with download counts and slugs. Prefer this over curling the APIs — responses are cached on disk.
+- ` + "`packwiz-tui mod-info <slug> [--source modrinth|curseforge]`" + ` — project details plus the versions installable in this pack, and the exact packwiz command to install a specific one.
 - ` + "`packwiz-tui fix-sources`" + ` — find CurseForge-API-blocked mods (breaks unattended installs) and swap them to byte-identical Modrinth files. Doubles as an install test.
 - ` + "`packwiz-tui convert-sources modrinth|curseforge [slug]`" + ` — convert every mod (or one slug) to the given source: modrinth conversions are byte-identical (sha1); curseforge conversions re-add by slug and roll back on failure.
 - ` + "`packwiz-tui tag-sides <server-pack.zip>`" + ` — set side=client/both on all mods by diffing an official server pack.
@@ -244,7 +255,7 @@ func agentChatCmd(packDir, prompt string, continueSession bool, mode int, mcpCon
 // same way lazygit is embedded — every agent keybinding works natively
 // because it owns the tty until it exits.
 func (a *App) openAgent() tea.Cmd {
-	c, err := agentCommand(a.packDir)
+	c, err := agentCommand(a.packDir, a.agentMode)
 	if err != nil {
 		return func() tea.Msg { return msgAgentDone{err: err} }
 	}

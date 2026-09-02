@@ -4,13 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
-	"time"
 )
 
 // FixModSources finds CurseForge mods whose authors block API distribution
@@ -280,24 +278,18 @@ func findTomlByFilename(packDir, jar string) (string, error) {
 
 // modrinthLookupByHash resolves a file sha1 to (projectID, versionID).
 func modrinthLookupByHash(sha1 string) (string, string, error) {
-	client := &http.Client{Timeout: 15 * time.Second}
-	url := "https://api.modrinth.com/v2/version_file/" + sha1 + "?algorithm=sha1"
-	resp, err := client.Get(url)
-	if err != nil {
-		return "", "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == 404 {
+	data, err := cachedGET("https://api.modrinth.com/v2/version_file/"+sha1+"?algorithm=sha1", nil)
+	if err == errAPINotFound {
 		return "", "", fmt.Errorf("hash not found")
 	}
-	if resp.StatusCode != 200 {
-		return "", "", fmt.Errorf("modrinth API returned %d", resp.StatusCode)
+	if err != nil {
+		return "", "", err
 	}
 	var v struct {
 		ID        string `json:"id"`
 		ProjectID string `json:"project_id"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+	if err := json.Unmarshal(data, &v); err != nil {
 		return "", "", err
 	}
 	if v.ID == "" || v.ProjectID == "" {
