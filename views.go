@@ -1204,6 +1204,38 @@ var (
 	styleTagCurseforge = lipgloss.NewStyle().Foreground(lipgloss.Color("#f16436")).Bold(true)
 )
 
+// sourceLogo returns a platform's 2-cell logo image block, or "" when it
+// isn't available (not kitty, or still fetching).
+func (a *App) sourceLogo(source string) string {
+	logoURL := modrinthLogoURL
+	if source == "curseforge" {
+		logoURL = curseforgeLogoURL
+	}
+	if b, ok := a.addModImgs[imgKey(logoURL, 2, 1)]; ok && b != "" && b != pendingImg {
+		return b
+	}
+	return ""
+}
+
+// hitSourceLogos renders a hit's source badges as the platforms' real logos
+// (kitty graphics). Falls back to ok=false until every needed logo is in.
+func (a *App) hitSourceLogos(h ModHit) (string, int, bool) {
+	logos, width := "", 0
+	for _, s := range h.Sources() {
+		l := a.sourceLogo(s)
+		if l == "" {
+			return "", 0, false
+		}
+		if width > 0 {
+			logos += " "
+			width++
+		}
+		logos += l
+		width += 2
+	}
+	return logos, width, true
+}
+
 // hitSourceTags renders a hit's source badges — every platform hosting the
 // mod, primary first. wide=false gives the two-letter list form ("mr cf"),
 // wide=true the full names. Returns the styled string and its cell width.
@@ -1274,6 +1306,11 @@ func (a *App) viewAddModModal() string {
 		for i := start; i < end; i++ {
 			hit := a.addModHits[i]
 			tags, tagW := hitSourceTags(hit, false)
+			if kitty {
+				if logos, w, ok := a.hitSourceLogos(hit); ok {
+					tags, tagW = logos, w
+				}
+			}
 			prefix := ""
 			if kitty {
 				if block, ok := a.addModImgs[imgKey(hit.IconURL, 2, 1)]; ok && block != "" && block != pendingImg {
@@ -1570,8 +1607,15 @@ func (a *App) renderAddModButtons(hit ModHit, rw int) ([]string, []addModZone) {
 		}
 		total += len(boxes) - 1
 		g := btnGroup{width: total}
-		labelPad := maxInt(0, (total-len(btns[i].source))/2)
-		g.lines = append(g.lines, strings.Repeat(" ", labelPad)+nameStyle.Render(btns[i].source))
+		// Group label: the platform's logo (when the terminal renders real
+		// images) to the left of its name.
+		label := nameStyle.Render(btns[i].source)
+		labelW := len(btns[i].source)
+		if logo := a.sourceLogo(btns[i].source); logo != "" {
+			label = logo + " " + label
+			labelW += 3
+		}
+		g.lines = append(g.lines, strings.Repeat(" ", maxInt(0, (total-labelW)/2))+label)
 		for r := 0; r < len(boxes[0]); r++ {
 			row := ""
 			for bi, box := range boxes {

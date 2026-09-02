@@ -115,6 +115,13 @@ func curseforgeGet(path string, q url.Values, into any) error {
 	return json.Unmarshal(data, into)
 }
 
+// Site logos for the add-mod popup's source badges (kitty graphics only).
+// Google's favicon service serves both as PNG at a stable URL.
+const (
+	modrinthLogoURL   = "https://www.google.com/s2/favicons?domain=modrinth.com&sz=64"
+	curseforgeLogoURL = "https://www.google.com/s2/favicons?domain=curseforge.com&sz=64"
+)
+
 // cfLoaderTypes maps loader names to CurseForge's modLoaderType enum.
 var cfLoaderTypes = map[string]string{
 	"forge": "1", "fabric": "4", "quilt": "5", "neoforge": "6",

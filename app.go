@@ -2332,6 +2332,9 @@ func (a *App) addModImageCmds() tea.Cmd {
 		for _, h := range a.addModHits {
 			fetch(h.IconURL, 2, 1)
 		}
+		// Site logos for the source badges and button-group labels.
+		fetch(modrinthLogoURL, 2, 1)
+		fetch(curseforgeLogoURL, 2, 1)
 	}
 	return tea.Batch(cmds...)
 }
