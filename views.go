@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	ansitruncate "github.com/muesli/reflow/truncate"
+	"github.com/muesli/termenv"
 )
 
 // ── Loading ───────────────────────────────────────────────────────────────────
@@ -1354,6 +1355,15 @@ func (a *App) viewAddModModal() string {
 	}
 	hint := muted.Render(truncate("↑/↓ select · ←/→ buttons · enter go · esc close", lw))
 
+	// ✕ close button pinned to the popup's top-right corner.
+	closeModalBtn := func(lines []string, width int) []string {
+		if pad := width - 2 - lipgloss.Width(lines[0]); pad > 0 {
+			lines[0] += strings.Repeat(" ", pad)
+		}
+		lines[0] += " " + styleCardAccent.Render("✕")
+		return lines
+	}
+
 	if !twoCol {
 		var lines []string
 		lines = append(lines, styleModalTitle.Render("◈ Add Mod"))
@@ -1365,7 +1375,9 @@ func (a *App) viewAddModModal() string {
 			lines = append(lines, "")
 		}
 		lines = append(lines[:ch-1], hint)
-		return styleModal.Render(strings.Join(lines, "\n"))
+		lines = closeModalBtn(lines, cw)
+		zone(cw-2, 0, 2, 1, "addmod:close")
+		return styleModal.Render(strings.Join(paintModalBg(lines), "\n"))
 	}
 
 	// ── Left column: query input with the results list beneath it ──
@@ -1400,7 +1412,7 @@ func (a *App) viewAddModModal() string {
 		}
 		logoOK := logo != "" && logo != pendingImg
 		tags, _ := hitSourceTags(hit, true)
-		titleLine := styleModalTitle.Render(truncate(hit.Title, rw))
+		titleLine := styleModalTitle.Render(truncate(hit.Title, rw-4))
 		dlLine := tags + muted.Render(" · "+humanCount(hit.Downloads)+" downloads")
 		if lipgloss.Width(dlLine) > rw {
 			dlLine = tags
@@ -1410,7 +1422,7 @@ func (a *App) viewAddModModal() string {
 			// Small full-res logo beside the title block.
 			logoLines := strings.Split(logo, "\n")
 			logoW := lc
-			textW := maxInt(8, rw-logoW-2)
+			textW := maxInt(8, rw-logoW-4)
 			titleLine = styleModalTitle.Render(truncate(hit.Title, textW))
 			if lipgloss.Width(dlLine) > textW {
 				dlLine = tags
@@ -1560,7 +1572,22 @@ func (a *App) viewAddModModal() string {
 		}
 		merged[i] = l + sep + r
 	}
-	return styleModal.Render(strings.Join(merged, "\n"))
+	merged = closeModalBtn(merged, lw+3+rw)
+	zone(lw+3+rw-2, 0, 2, 1, "addmod:close")
+	return styleModal.Render(strings.Join(paintModalBg(merged), "\n"))
+}
+
+// paintModalBg re-asserts the popup's panel background after every full SGR
+// reset in a line — nested lipgloss renders end with resets that would
+// otherwise punch holes in the background from that point on, which reads
+// as a patchy, inconsistent popup interior.
+func paintModalBg(lines []string) []string {
+	bg := "\x1b[" + termenv.ColorProfile().Convert(termenv.RGBColor(string(colorBgPanel))).Sequence(true) + "m"
+	out := make([]string, len(lines))
+	for i, l := range lines {
+		out[i] = bg + strings.ReplaceAll(l, "\x1b[0m", "\x1b[0m"+bg)
+	}
+	return out
 }
 
 // addModZone is a clickable area relative to the button block's first line.

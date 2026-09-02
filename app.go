@@ -693,6 +693,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							return a, a.addModShotMove(-1)
 						} else if z.action == "addmod:shotnext" {
 							return a, a.addModShotMove(1)
+						} else if z.action == "addmod:close" {
+							a.closeAddModModal()
+							return a, nil
 						}
 					}
 				}
