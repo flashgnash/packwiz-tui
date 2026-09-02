@@ -23,6 +23,7 @@ type ModDetail struct {
 	Side       string
 	Source     string // "modrinth", "curseforge", "local"
 	Optional   bool
+	Default    bool // optional mods only: enabled by default in installers
 	ProjectID  string
 	VersionID  string
 	CurVersion string // resolved human version number
@@ -86,9 +87,12 @@ type msgModConvertDone struct {
 type msgModDetailFetch struct{ slug string } // debounced scroll-sync fetch
 
 // Control rows in the detail pane: fields first, then the button stack.
+// mdCtlDefault only exists while the mod is optional — navigation skips it
+// otherwise.
 const (
 	mdCtlSide = iota
 	mdCtlOptional
+	mdCtlDefault
 	mdCtlVersion
 	mdCtlConvert
 	mdCtlProject
@@ -200,6 +204,7 @@ func loadModDetailFields(d *ModDetail) {
 		d.Side = "both"
 	}
 	d.Optional = strings.Contains(s, "optional = true")
+	d.Default = strings.Contains(s, "default = true")
 	if hf, _ := readTomlField(d.TomlPath, "hash-format"); hf == "sha1" {
 		d.Sha1, _ = readTomlField(d.TomlPath, "hash")
 	}
@@ -355,10 +360,16 @@ func (a *App) updateModDetail(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "up", "k":
 		if d.ctlIdx > 0 {
 			d.ctlIdx--
+			if d.ctlIdx == mdCtlDefault && !d.Optional {
+				d.ctlIdx--
+			}
 		}
 	case "down", "j":
 		if d.ctlIdx < mdCtlCount-1 {
 			d.ctlIdx++
+			if d.ctlIdx == mdCtlDefault && !d.Optional {
+				d.ctlIdx++
+			}
 		}
 	case "right", "l":
 		// Move from the field column into the button stack.
@@ -425,6 +436,27 @@ func (a *App) applyModOptional(optional bool) (tea.Model, tea.Cmd) {
 		return a, a.expireStatus()
 	}
 	d.Optional = optional
+	if !optional && d.ctlIdx == mdCtlDefault {
+		d.ctlIdx = mdCtlOptional // the default row just disappeared
+	}
+	packDir := a.packDir
+	go func() { RunPackwiz(packDir, "refresh") }()
+	return a, a.loadMods()
+}
+
+// applyModDefault writes the enabled-by-default flag and refreshes.
+func (a *App) applyModDefault(def bool) (tea.Model, tea.Cmd) {
+	d := a.modDetail
+	if d == nil || !d.Optional || d.Default == def {
+		return a, nil
+	}
+	if err := writeTomlDefault(d.TomlPath, def); err != nil {
+		a.statusMsg = "default toggle failed: " + err.Error()
+		a.statusIsErr = true
+		a.statusExpire = time.Now().Add(4 * time.Second)
+		return a, a.expireStatus()
+	}
+	d.Default = def
 	packDir := a.packDir
 	go func() { RunPackwiz(packDir, "refresh") }()
 	return a, a.loadMods()
@@ -446,6 +478,8 @@ func (a *App) activateModDetailCtl(i int) (tea.Model, tea.Cmd) {
 		return a.applyModSide(stepSide(d.Side, 1))
 	case mdCtlOptional:
 		return a.applyModOptional(!d.Optional)
+	case mdCtlDefault:
+		return a.applyModDefault(!d.Default)
 	case mdCtlVersion:
 		switch {
 		case d.Source == "local":
@@ -577,6 +611,10 @@ func (a *App) modDetailClick(action string) (tea.Model, tea.Cmd) {
 		a.focusHome(5)
 		d.ctlIdx = mdCtlOptional
 		return a.applyModOptional(act == "opt:on")
+	case act == "def:on" || act == "def:off":
+		a.focusHome(5)
+		d.ctlIdx = mdCtlDefault
+		return a.applyModDefault(act == "def:on")
 	case strings.HasPrefix(act, "ver:"):
 		var i int
 		fmt.Sscanf(act, "ver:%d", &i)
@@ -745,6 +783,18 @@ func (a *App) renderModDetailPane(totalW, h, paneX, paneTop int) string {
 		})
 	addField("", nil)
 
+	// Enabled by default — only meaningful for optional mods.
+	if d.Optional {
+		addField(groupLabel(mdCtlDefault, "Enabled by default"), lineZone("home:mdetail:ctl:2"))
+		addField(chip("yes", d.Default)+styleCardFill.Render(" ")+chip("no", !d.Default),
+			func(row int) {
+				a.clickZones = append(a.clickZones,
+					clickZone{x: paneX + 2, y: paneTop + 1 + fieldTop + row, w: 5, h: 1, action: "home:mdetail:def:on"},
+					clickZone{x: paneX + 2 + 6, y: paneTop + 1 + fieldTop + row, w: 4, h: 1, action: "home:mdetail:def:off"})
+			})
+		addField("", nil)
+	}
+
 	// Version.
 	curVer := d.CurVersion
 	if curVer == "" {
@@ -754,9 +804,9 @@ func (a *App) renderModDetailPane(totalW, h, paneX, paneTop int) string {
 			curVer = "(unknown)"
 		}
 	}
-	addField(groupLabel(mdCtlVersion, "Version"), lineZone("home:mdetail:ctl:2"))
+	addField(groupLabel(mdCtlVersion, "Version"), lineZone("home:mdetail:ctl:3"))
 	addField(styleCardText.Render(truncate(curVer, maxInt(4, lw-3)))+styleCardAccent.Render(" ▾"),
-		lineZone("home:mdetail:ctl:2"))
+		lineZone("home:mdetail:ctl:3"))
 
 	if d.dropOpen {
 		dropMax := maxInt(1, h-2-fieldTop-len(fields)-1)

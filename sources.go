@@ -237,6 +237,32 @@ func writeTomlOptional(path string, optional bool) error {
 	return os.WriteFile(path, []byte(s), 0644)
 }
 
+var reDefaultLine = regexp.MustCompile(`(?m)^\s*default\s*=\s*(true|false)\s*$`)
+
+// writeTomlDefault sets (or adds) the [option] default flag — whether an
+// optional mod is enabled by default in installers.
+func writeTomlDefault(path string, def bool) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	s := string(data)
+	line := fmt.Sprintf("default = %v", def)
+	if reDefaultLine.MatchString(s) {
+		s = reDefaultLine.ReplaceAllString(s, line)
+	} else if loc := reOptionalLine.FindStringSubmatchIndex(s); loc != nil {
+		// Insert directly after the optional value (loc[3]), before any
+		// trailing whitespace the line pattern swallowed.
+		s = s[:loc[3]] + "\n" + line + s[loc[3]:]
+	} else {
+		if !strings.HasSuffix(s, "\n") {
+			s += "\n"
+		}
+		s += "\n[option]\noptional = true\n" + line + "\n"
+	}
+	return os.WriteFile(path, []byte(s), 0644)
+}
+
 var reBlockedJar = regexp.MustCompile(`save this file to .*[/\\]([^/\\]+\.jar)`)
 
 // detectBlockedMods runs packwiz-installer into a scratch dir and collects
