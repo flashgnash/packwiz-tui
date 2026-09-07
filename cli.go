@@ -41,7 +41,8 @@ commands:
                      curseforge (by slug, rolled back if not found)
   export <what>      build artifacts into .packwiz-tui/build/ — prism (importable,
                      self-updating from this repo), prism-preinstalled (same but with
-                     all mods bundled), mrpack, curseforge, server, or all
+                     all mods bundled), mrpack, curseforge, mods (plain zip of the
+                     client mod jars, for manual installs), server, or all
   install-prism      write the self-updating instance into the local PrismLauncher
   launch-client      install the pack client-side and start it via portablemc
                      (fallback launcher — the TUI prefers PrismLauncher)
@@ -209,7 +210,7 @@ func RunCLI(args []string) (handled bool, exitCode int) {
 
 	case "export":
 		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "usage: packwiz-tui export prism|prism-preinstalled|mrpack|curseforge|server|all")
+			fmt.Fprintln(os.Stderr, "usage: packwiz-tui export prism|prism-preinstalled|mrpack|curseforge|mods|server|all")
 			return true, 1
 		}
 		packDir := findPack()
@@ -223,6 +224,8 @@ func RunCLI(args []string) (handled bool, exitCode int) {
 			_, err = ExportPackwiz(packDir, "modrinth", os.Stdout)
 		case "curseforge":
 			_, err = ExportPackwiz(packDir, "curseforge", os.Stdout)
+		case "mods":
+			_, err = ExportModsZip(packDir, os.Stdout)
 		case "server":
 			_, err = ExportServer(packDir, os.Stdout)
 		case "all":

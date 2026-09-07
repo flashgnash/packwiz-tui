@@ -19,6 +19,7 @@ import (
 //                the instance self-updates on every launch
 //   mrpack     — Modrinth pack via `packwiz modrinth export` (Prism imports these too)
 //   curseforge — CurseForge zip via `packwiz curseforge export`
+//   mods       — plain zip of the client mod jars (packwiz-installer -s client)
 //   server     — ready-to-run server files zip (packwiz-installer -s server)
 
 func buildDir(packDir string) (string, error) {
@@ -220,6 +221,37 @@ func ExportMMCPreinstalled(packDir string, progress io.Writer) (string, error) {
 	return dest, nil
 }
 
+// ExportModsZip writes a plain zip of the client mod jars, pre-downloaded,
+// under a mods/ prefix — for people running a manual install with no
+// launcher integration: extract into the instance's .minecraft (replacing
+// the old mods folder) and you're updated.
+func ExportModsZip(packDir string, progress io.Writer) (string, error) {
+	meta, err := ParsePackMeta(packDir)
+	if err != nil {
+		return "", err
+	}
+	out, err := buildDir(packDir)
+	if err != nil {
+		return "", err
+	}
+	scratch, err := os.MkdirTemp("", "packwiz-tui-mods-export-")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(scratch)
+
+	fmt.Fprintln(progress, "installing client mods for mods zip…")
+	if instOut, err := RunPackwizInstaller(scratch, packDir, "client"); err != nil {
+		return "", fmt.Errorf("packwiz-installer failed:\n%s", tail(instOut, 30))
+	}
+	dest := filepath.Join(out, artifactBase(packDir, meta)+"-mods.zip")
+	if err := writeZipWithDir(dest, nil, filepath.Join(scratch, "mods"), "mods"); err != nil {
+		return "", err
+	}
+	fmt.Fprintf(progress, "mods zip: %s\n", dest)
+	return dest, nil
+}
+
 // InstallPrism writes the self-updating instance straight into the local
 // PrismLauncher instances directory — no zip import needed. If the instance
 // already exists, only its metadata files are refreshed; worlds, options and
@@ -361,6 +393,7 @@ func ExportAll(packDir string, progress io.Writer) ([]string, error) {
 	steps := []step{
 		{"prism", func() (string, error) { return ExportMMC(packDir, progress) }},
 		{"prism-preinstalled", func() (string, error) { return ExportMMCPreinstalled(packDir, progress) }},
+		{"mods", func() (string, error) { return ExportModsZip(packDir, progress) }},
 		{"mrpack", func() (string, error) { return ExportPackwiz(packDir, "modrinth", progress) }},
 		{"curseforge", func() (string, error) { return ExportPackwiz(packDir, "curseforge", progress) }},
 		{"server", func() (string, error) { return ExportServer(packDir, progress) }},
