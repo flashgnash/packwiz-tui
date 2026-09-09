@@ -25,11 +25,6 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      # Optional: add this repo secret to get LLM-written changelog sections
-      # for config/script changes. Without it the changelog still lists mod
-      # additions/removals (from git) plus a changed-file list.
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -56,10 +51,6 @@ jobs:
           go install github.com/packwiz/packwiz@latest
           go install github.com/flashgnash/packwiz-tui@master
 
-      - name: Install claude (LLM changelog descriptions)
-        if: env.ANTHROPIC_API_KEY != ''
-        run: npm install -g @anthropic-ai/claude-code
-
       - name: Build artifacts
         run: packwiz-tui export all
 
@@ -73,8 +64,8 @@ jobs:
             echo "- **.mrpack** — import into Prism or the Modrinth app"
             echo "- **-server.zip** — ready-to-run server files"
           } > .packwiz-tui/release-notes.md
-          # Changelog vs the previous tag: mod adds/removals diffed from git,
-          # other changes described by claude (or listed if no API key).
+          # Changelog vs the previous tag: mod adds/removals/updates diffed
+          # from git (purely mechanical, no LLM).
           prev=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)
           if packwiz-tui changelog > .packwiz-tui/changelog.md && [ -s .packwiz-tui/changelog.md ]; then
             {

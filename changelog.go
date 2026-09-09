@@ -9,10 +9,9 @@ import (
 )
 
 // Changelog builds a markdown changelog between two git refs: a deterministic
-// mod added/removed/updated section diffed from mods/*.toml, plus an
-// LLM-written summary of everything else (configs, scripts, pack metadata).
-// When no LLM is available the second section falls back to a changed-file
-// list, so CI without an API key still gets a useful changelog.
+// mod added/removed/updated section diffed from mods/*.toml. It is purely
+// mechanical — no LLM involvement — so it produces identical output for the
+// same diff every time.
 func Changelog(packDir, from, to string, progress io.Writer) (string, error) {
 	root, err := DetectGitRepoFrom(packDir)
 	if err != nil {
@@ -33,7 +32,6 @@ func Changelog(packDir, from, to string, progress io.Writer) (string, error) {
 		rel = "."
 	}
 	modsPath := filepath.ToSlash(filepath.Join(rel, "mods"))
-	indexPath := filepath.ToSlash(filepath.Join(rel, "index.toml"))
 
 	var b strings.Builder
 
@@ -47,25 +45,6 @@ func Changelog(packDir, from, to string, progress io.Writer) (string, error) {
 		writeModSection(&b, "Added", added)
 		writeModSection(&b, "Removed", removed)
 		writeModSection(&b, "Updated", updated)
-	}
-
-	// ── Everything else (LLM-described, with a file-list fallback) ──
-	otherDiff, _ := gitOut(root, "diff", from+".."+to, "--",
-		".", ":(exclude)"+modsPath, ":(exclude)"+indexPath)
-	if strings.TrimSpace(otherDiff) != "" {
-		b.WriteString("## Other changes\n\n")
-		if desc, err := describeDiffLLM(packDir, otherDiff); err == nil {
-			b.WriteString(strings.TrimSpace(desc) + "\n")
-		} else {
-			fmt.Fprintf(progress, "changelog: LLM summary unavailable (%v), listing files\n", err)
-			files, _ := gitOut(root, "diff", "--name-only", from+".."+to, "--",
-				".", ":(exclude)"+modsPath, ":(exclude)"+indexPath)
-			for _, f := range strings.Split(strings.TrimSpace(files), "\n") {
-				if f != "" {
-					b.WriteString("- `" + f + "`\n")
-				}
-			}
-		}
 	}
 
 	if b.Len() == 0 {
@@ -211,39 +190,6 @@ func previousTag(root, ref string) string {
 		return ""
 	}
 	return strings.TrimSpace(out)
-}
-
-const changelogPrompt = `You are writing release notes for a Minecraft modpack. Below is a git diff of the pack repository EXCLUDING the mod list itself (mod additions/removals are covered elsewhere). Summarise the player-visible changes as short markdown bullet points with no heading: config changes, recipe/script tweaks, performance settings, world-gen, pack metadata, launcher behaviour. Ignore lockfile/hash/index churn and CI plumbing. Be concrete but brief. If nothing player-visible changed, output exactly: No notable changes.`
-
-// describeDiffLLM asks the configured agent (claude -p by default) to
-// describe a diff for the changelog. Works headlessly in CI when an API key
-// is present.
-func describeDiffLLM(packDir, diff string) (string, error) {
-	cfg := LoadConfig()
-	parts := strings.Fields(cfg.Agent)
-	if _, err := exec.LookPath(parts[0]); err != nil {
-		return "", err
-	}
-	const maxDiff = 200_000
-	if len(diff) > maxDiff {
-		diff = diff[:maxDiff] + "\n… (diff truncated)"
-	}
-	args := append(parts[1:], "-p", changelogPrompt)
-	c := exec.Command(parts[0], args...)
-	c.Dir = packDir
-	c.Stdin = strings.NewReader(diff)
-	out, err := c.CombinedOutput()
-	text := strings.TrimSpace(string(out))
-	if err != nil {
-		if text != "" {
-			return "", fmt.Errorf("%s", text)
-		}
-		return "", err
-	}
-	if text == "" {
-		return "", fmt.Errorf("agent returned no output")
-	}
-	return text, nil
 }
 
 // gitOut runs git in root and returns stdout.
