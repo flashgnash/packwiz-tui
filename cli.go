@@ -56,6 +56,7 @@ commands:
   init-workflow      scaffold .github/workflows/release.yml (build artifacts on every
                      push; publish a GitHub release on v* tag push)
   agent              open the configured chat agent (default: claude) in the pack dir
+  agent-help         dump the complete command reference in one call (for AI agents)
 
 flags for test:
   --ram N            heap in GB for server/client (default 8, clamped to system RAM)
@@ -63,6 +64,82 @@ flags for test:
   --timeout DURATION max wait for server boot / client join (default 15m)
   --port N           server port (default 25565)
   --rcon-port N      rcon port (default 25575)
+`)
+}
+
+// agentHelp prints the complete command reference in one dump so AI agents can
+// learn the whole surface in a single tool call (`packwiz-tui agent-help`).
+func agentHelp() {
+	fmt.Print(`packwiz-tui — packwiz modpack manager (TUI + headless CLI). This is the
+engine for ALL modpack/server mechanics: loader installs, test servers,
+headless clients, exports. Never hand-roll packwiz bootstrap around it.
+
+Every command runs against the pack found in (or above) the current directory
+(the directory containing pack.toml). Run commands from the pack repo.
+
+COMMANDS
+  test server [--ram N] [--timeout 15m] [--port 25565] [--rcon-port 25575]
+      Install the pack server-side (loader installer + packwiz-installer),
+      boot it, wait for ready, sample TPS via RCON, then shut down.
+      Instance persists at .packwiz-tui/test-server/ (reused; loader install
+      is skipped when the .loader-<loader>-<version> marker exists).
+  test full [--ram N] [--soak 90s] [--timeout 15m]
+      Everything test server does, plus a real headless client (gamescope +
+      portablemc) that joins the server, soaks, and captures screenshots to
+      .packwiz-tui/last-test/soak-*.png.
+  tag-sides <server-pack.zip>
+      Set side=client/both on every mod by diffing against a server pack zip.
+  fix-sources [--side client]
+      Swap CurseForge-API-blocked mods to byte-identical Modrinth equivalents.
+  convert-sources modrinth|curseforge [slug]
+      Convert every mod (or one slug) to the given source.
+  search [--source modrinth|curseforge|all] [--limit 8] [--any-version] <query>
+      Search for mods matching this pack's mc version/loader.
+  mod-info [--source modrinth|curseforge] [--limit 10] [--any-version] <slug>
+      Project details + installable versions + exact packwiz install command.
+  export prism|prism-preinstalled|mrpack|curseforge|server|all
+      Build artifacts into .packwiz-tui/build/.
+  install-prism
+      Write a self-updating instance into the local PrismLauncher.
+  launch-client
+      Install client-side and launch via portablemc (fallback launcher).
+  server-ip [address]
+      Get/set the server address prefilled into prism exports/installs.
+  nixos-config
+      Print a services.minecraft-servers block for the nix-minecraft module.
+  changelog [--from <ref>] [--to <ref>]
+      Markdown changelog between refs (defaults: previous tag -> HEAD).
+  release [tag]
+      export all + publish a GitHub release via gh (default tag: v<pack version>).
+  init-workflow
+      Scaffold .github/workflows/release.yml.
+  agent
+      Open the configured chat agent (default: claude) in the pack dir.
+
+FLAG DEFAULTS (test)
+  --ram 8 (GB, clamped to system RAM)   --soak 90s   --timeout 15m
+  --port 25565   --rcon-port 25575
+  Flags may appear before or after positional args on all commands.
+
+FILES & DIRECTORIES (all inside the pack repo; safe to delete; git-ignored)
+  .packwiz-tui/test-server/   server instance: loader libs, mods/, world/,
+                              server.properties (online-mode=false, RCON on,
+                              generated rcon.password), eula.txt,
+                              harness-console.log
+  .packwiz-tui/test-client/   headless client from test full
+  .packwiz-tui/client/        persistent client for launch-client
+  .packwiz-tui/pmc/           portablemc main dir
+  .packwiz-tui/build/         export artifacts
+  .packwiz-tui/last-test/     screenshots + metrics from last full test
+
+CONFIG
+  ~/.packwiz-tui-config.json  {"agent": "claude"} — chat agent command
+  PACKWIZ_TUI_AGENT           env override for the agent command
+  pack.toml [versions]        minecraft = "1.21.x" + one of neoforge/forge/
+                              fabric/quilt selects the loader.
+
+EXIT CODES
+  0 success, 1 failure (details on stderr, prefixed FAILED:).
 `)
 }
 
@@ -103,6 +180,10 @@ func RunCLI(args []string) (handled bool, exitCode int) {
 	switch args[0] {
 	case "-h", "--help", "help":
 		cliUsage()
+		return true, 0
+
+	case "agent-help", "--agent-help":
+		agentHelp()
 		return true, 0
 
 	case "test":
