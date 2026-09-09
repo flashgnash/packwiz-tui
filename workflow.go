@@ -69,6 +69,7 @@ jobs:
             echo "- **-prism.zip** — import into PrismLauncher; downloads the pack on first launch and auto-updates from this repo (recommended)"
             echo "- **-prism-preinstalled.zip** — same, but with all mods already bundled; no first-launch wait"
             echo "- **-curseforge.zip** — import into the CurseForge app"
+            echo "- **-mods.zip** — just the mod jars, pre-downloaded; extract into a manual install's .minecraft"
             echo "- **.mrpack** — import into Prism or the Modrinth app"
             echo "- **-server.zip** — ready-to-run server files"
           } > .packwiz-tui/release-notes.md
@@ -104,8 +105,12 @@ jobs:
             echo
             cat .packwiz-tui/release-notes.md
           } > .packwiz-tui/rolling-notes.md
-          gh release delete latest --yes 2>/dev/null || true
+          # --cleanup-tag so the git tag moves to this build too; otherwise it
+          # stays frozen at its first commit and the changelog diffs against
+          # the beginning of history forever.
+          gh release delete latest --yes --cleanup-tag 2>/dev/null || true
           gh release create latest --title "Latest build (rolling)" \
+            --target "$GITHUB_SHA" \
             --notes-file .packwiz-tui/rolling-notes.md \
             .packwiz-tui/build/*.zip .packwiz-tui/build/*.mrpack
 

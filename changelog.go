@@ -88,23 +88,81 @@ func diffMods(root, from, to, modsPath string) (added, removed, updated []string
 		}
 		switch {
 		case fields[0] == "A":
-			added = append(added, modNameAt(root, to, fields[1]))
+			added = append(added, modEntry(root, to, fields[1], ""))
 		case fields[0] == "D":
-			removed = append(removed, modNameAt(root, from, fields[1]))
+			removed = append(removed, modEntry(root, from, fields[1], ""))
 		case fields[0] == "M":
 			oldFile := modFieldAt(root, from, fields[1], "filename")
 			newFile := modFieldAt(root, to, fields[1], "filename")
-			name := modNameAt(root, to, fields[1])
+			change := ""
 			if oldFile != newFile && oldFile != "" && newFile != "" {
-				updated = append(updated, fmt.Sprintf("%s: `%s` → `%s`", name, oldFile, newFile))
-			} else {
-				updated = append(updated, name)
+				change = fmt.Sprintf("`%s` → `%s`", oldFile, newFile)
 			}
+			updated = append(updated, modEntry(root, to, fields[1], change))
 		case strings.HasPrefix(fields[0], "R") && len(fields) >= 3:
-			updated = append(updated, modNameAt(root, to, fields[2]))
+			updated = append(updated, modEntry(root, to, fields[2], ""))
 		}
 	}
 	return added, removed, updated, nil
+}
+
+// modEntry formats one changelog line body for a mod toml at a given ref:
+// the display name, a styled link to its source (Modrinth/CurseForge) pinned
+// to the exact version, and either an explicit change note or the mod's
+// version (its jar filename).
+func modEntry(root, ref, path, change string) string {
+	entry := modNameAt(root, ref, path)
+	if link := modLinkAt(root, ref, path); link != "" {
+		entry += " — " + link
+	}
+	switch {
+	case change != "":
+		entry += " " + change
+	default:
+		if file := modFieldAt(root, ref, path, "filename"); file != "" {
+			entry += " `" + file + "`"
+		}
+	}
+	return entry
+}
+
+// modLinkAt builds a styled markdown link to a mod's source page from its
+// [update.modrinth] or [update.curseforge] block at a given ref, pinned to the
+// exact version/file when available. Returns "" when neither source is present.
+func modLinkAt(root, ref, path string) string {
+	content, err := gitOut(root, "show", ref+":"+path)
+	if err != nil {
+		return ""
+	}
+	section := ""
+	f := map[string]string{}
+	for _, line := range strings.Split(content, "\n") {
+		t := strings.TrimSpace(line)
+		if strings.HasPrefix(t, "[") && strings.HasSuffix(t, "]") {
+			section = strings.Trim(t, "[]")
+			continue
+		}
+		if i := strings.IndexByte(t, '='); i > 0 {
+			key := strings.TrimSpace(t[:i])
+			val := strings.Trim(strings.TrimSpace(t[i+1:]), `"'`)
+			f[section+"."+key] = val
+		}
+	}
+	switch {
+	case f["update.modrinth.mod-id"] != "":
+		url := "https://modrinth.com/project/" + f["update.modrinth.mod-id"]
+		if v := f["update.modrinth.version"]; v != "" {
+			url += "/version/" + v
+		}
+		return "[modrinth](" + url + ")"
+	case f["update.curseforge.project-id"] != "":
+		url := "https://www.curseforge.com/projects/" + f["update.curseforge.project-id"]
+		if v := f["update.curseforge.file-id"]; v != "" {
+			url += "/files/" + v
+		}
+		return "[curseforge](" + url + ")"
+	}
+	return ""
 }
 
 func writeModSection(b *strings.Builder, title string, items []string) {
