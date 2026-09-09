@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"net/url"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -105,10 +106,14 @@ func modEntry(root, ref, path, change string) string {
 	return entry
 }
 
-// modLinkAt builds a styled markdown link to a mod's source page from its
-// [update.modrinth] or [update.curseforge] block at a given ref, pinned to the
-// exact version/file when available. Returns "" when neither source is present.
+// modLinkAt builds styled markdown links for a mod at a given ref. It always
+// links the platform the mod is installed from (pinned to the exact
+// version/file), listed first; then, only when the same mod is confirmed to
+// exist on the other platform via its API, it appends a link there too. The
+// counterpart is verified so we never emit a dead link — mods that only live
+// on one site get a single link. Returns "" for mods with no update source.
 func modLinkAt(root, ref, path string) string {
+	slug := strings.TrimSuffix(filepath.Base(path), ".pw.toml")
 	content, err := gitOut(root, "show", ref+":"+path)
 	if err != nil {
 		return ""
@@ -129,19 +134,62 @@ func modLinkAt(root, ref, path string) string {
 	}
 	switch {
 	case f["update.modrinth.mod-id"] != "":
-		url := "https://modrinth.com/project/" + f["update.modrinth.mod-id"]
+		mr := "https://modrinth.com/mod/" + slug
 		if v := f["update.modrinth.version"]; v != "" {
-			url += "/version/" + v
+			mr += "/version/" + v
 		}
-		return "[modrinth](" + url + ")"
+		link := "[modrinth](" + mr + ")"
+		if cf := curseforgeSlugFor(slug); cf != "" {
+			link += " · [curseforge](https://www.curseforge.com/minecraft/mc-mods/" + cf + ")"
+		}
+		return link
 	case f["update.curseforge.project-id"] != "":
-		url := "https://www.curseforge.com/projects/" + f["update.curseforge.project-id"]
+		cf := "https://www.curseforge.com/minecraft/mc-mods/" + slug
 		if v := f["update.curseforge.file-id"]; v != "" {
-			url += "/files/" + v
+			cf += "/files/" + v
 		}
-		return "[curseforge](" + url + ")"
+		link := "[curseforge](" + cf + ")"
+		if mr := modrinthSlugFor(slug); mr != "" {
+			link += " · [modrinth](https://modrinth.com/mod/" + mr + ")"
+		}
+		return link
 	}
 	return ""
+}
+
+// modrinthSlugFor returns a mod's Modrinth page slug if a project with this
+// slug exists, else "" — used to confirm a CurseForge-installed mod also has a
+// Modrinth page before linking it.
+func modrinthSlugFor(slug string) string {
+	var p struct {
+		Slug string `json:"slug"`
+	}
+	if err := modrinthGet("/project/"+url.PathEscape(slug), nil, &p); err != nil {
+		return ""
+	}
+	if p.Slug != "" {
+		return p.Slug
+	}
+	return slug
+}
+
+// curseforgeSlugFor returns a mod's CurseForge page slug if a project with this
+// slug exists, else "" — used to confirm a Modrinth-installed mod also has a
+// CurseForge page before linking it.
+func curseforgeSlugFor(slug string) string {
+	q := url.Values{"gameId": {"432"}, "classId": {"6"}, "slug": {slug}}
+	var res struct {
+		Data []struct {
+			Slug string `json:"slug"`
+		} `json:"data"`
+	}
+	if err := curseforgeGet("/mods/search", q, &res); err != nil || len(res.Data) == 0 {
+		return ""
+	}
+	if s := res.Data[0].Slug; s != "" {
+		return s
+	}
+	return slug
 }
 
 func writeModSection(b *strings.Builder, title string, items []string) {
